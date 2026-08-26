@@ -7,9 +7,13 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Clock3,
   Flame,
   Loader2,
+  LayoutGrid,
+  List,
   PackageSearch,
   Play,
   RefreshCw,
@@ -117,6 +121,9 @@ export function ToolOvenBoard() {
   const [waitingPage, setWaitingPage] = useState(1);
   const [heatingPage, setHeatingPage] = useState(1);
   const [releasedPage, setReleasedPage] = useState(1);
+  const [visibleStages, setVisibleStages] = useState({ waiting: true, heating: true, released: true });
+  const [collapsedStages, setCollapsedStages] = useState({ waiting: false, heating: false, released: false });
+  const [boardView, setBoardView] = useState<"cards" | "map">("cards");
 
   const load = useCallback(async (silent = false) => {
     if (!organizationId) return;
@@ -178,6 +185,16 @@ export function ToolOvenBoard() {
   const visibleAvailable = available.slice((Math.min(waitingPage, waitingPages) - 1) * WAITING_PAGE_SIZE, Math.min(waitingPage, waitingPages) * WAITING_PAGE_SIZE);
   const visibleHeating = heating.slice((Math.min(heatingPage, heatingPages) - 1) * HEATING_PAGE_SIZE, Math.min(heatingPage, heatingPages) * HEATING_PAGE_SIZE);
   const visibleReleased = released.slice((Math.min(releasedPage, releasedPages) - 1) * RELEASED_PAGE_SIZE, Math.min(releasedPage, releasedPages) * RELEASED_PAGE_SIZE);
+  const visibleStageCount = boardView === "map"
+    ? Number(visibleStages.waiting) + Number(visibleStages.heating || visibleStages.released)
+    : Object.values(visibleStages).filter(Boolean).length;
+  const boardGridClass = visibleStageCount === 1 ? "xl:grid-cols-1" : visibleStageCount === 2 ? "xl:grid-cols-2" : "xl:grid-cols-3";
+  function toggleStage(stage: keyof typeof visibleStages) {
+    setVisibleStages((current) => {
+      const next = { ...current, [stage]: !current[stage] };
+      return Object.values(next).some(Boolean) ? next : current;
+    });
+  }
 
   async function startHeating() {
     const position = Number(ovenPosition);
@@ -256,21 +273,37 @@ export function ToolOvenBoard() {
       </header>
       {message && <div className={cn("rounded-lg border px-3 py-2 text-sm", /não|falha|erro|ainda/i.test(message) ? "border-red-200 bg-red-50 text-red-700" : "border-emerald-200 bg-emerald-50 text-emerald-800")}>{message}</div>}
 
-      <div className="grid min-w-0 gap-3 xl:grid-cols-[.88fr_1.12fr_1fr]">
-        <BoardColumn title="1. Aguardando" subtitle="Simplificadas ativas" icon={<PackageSearch className="size-4" />} value={available.length} detail="para o forno">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-white px-3 py-2 shadow-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-[11px] font-semibold text-slate-500">Exibir etapas</p>
+          <div className="flex flex-wrap gap-1.5">
+            <StageToggle active={visibleStages.waiting} tone="slate" onClick={() => toggleStage("waiting")}>Aguardando <span>{available.length}</span></StageToggle>
+            <StageToggle active={visibleStages.heating} tone="orange" onClick={() => toggleStage("heating")}>Aquecendo <span>{heating.length}</span></StageToggle>
+            <StageToggle active={visibleStages.released} tone="green" onClick={() => toggleStage("released")}>Liberadas <span>{released.length}</span></StageToggle>
+          </div>
+        </div>
+        <div className="flex items-center rounded-lg bg-slate-100 p-0.5">
+          <button type="button" onClick={() => setBoardView("cards")} className={cn("inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-bold transition", boardView === "cards" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-800")}><List className="size-3.5" />Cards</button>
+          <button type="button" onClick={() => setBoardView("map")} className={cn("inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-bold transition", boardView === "map" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-800")}><LayoutGrid className="size-3.5" />Mapa do forno</button>
+        </div>
+      </div>
+
+      <div className={cn("grid min-w-0 gap-3", boardGridClass)}>
+        {visibleStages.waiting && <BoardColumn title="1. Aguardando" subtitle="Simplificadas ativas" icon={<PackageSearch className="size-4" />} value={available.length} detail="para o forno" collapsed={collapsedStages.waiting} onToggle={() => setCollapsedStages((current) => ({ ...current, waiting: !current.waiting }))}>
           <div className="relative mb-2"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><Input value={query} onChange={(event) => { setQuery(event.target.value); setWaitingPage(1); }} placeholder="Ferramenta, Plano ou cliente" className="h-9 pl-9" /></div>
           {loading ? <Loading /> : available.length ? visibleAvailable.map((group) => <AvailableCard key={group.key} group={group} onChoose={() => { setSelected(group); setToolType(inferredToolType(group.orders)); setTargetMachine(group.machine); setOvenId(""); setOvenPosition(""); setMessage(""); setDialogProblem(""); }} />) : <Empty text="Nenhuma ferramenta aguardando forno." />}
           <Pager page={Math.min(waitingPage, waitingPages)} pages={waitingPages} onChange={setWaitingPage} />
-        </BoardColumn>
-        <BoardColumn title="2. Aquecendo" subtitle="Contagem em tempo real" icon={<Flame className="size-4 text-orange-600" />} value={heating.length} detail={`${Math.max(0, visibleCapacity - heating.length)} vagas livres`} tone="orange">
+        </BoardColumn>}
+        {boardView === "cards" && visibleStages.heating && <BoardColumn title="2. Aquecendo" subtitle="Contagem em tempo real" icon={<Flame className="size-4 text-orange-600" />} value={heating.length} detail={`${Math.max(0, visibleCapacity - heating.length)} vagas livres`} tone="orange" collapsed={collapsedStages.heating} onToggle={() => setCollapsedStages((current) => ({ ...current, heating: !current.heating }))}>
           {heating.length ? visibleHeating.map((cycle) => <HeatingCard key={cycle.id} cycle={cycle} now={now} saving={saving} onRelease={() => { setReleaseCycle(cycle); setReleaseReason(""); setDialogProblem(""); }} onCancel={() => { setCancelCycle(cycle); setCancelReason(""); }} onRelocate={() => openRelocate(cycle)} />) : <Empty text="Nenhuma ferramenta no forno." />}
           <Pager page={Math.min(heatingPage, heatingPages)} pages={heatingPages} onChange={setHeatingPage} />
-        </BoardColumn>
-        <BoardColumn title="3. Liberadas" subtitle="Prontas para produzir" icon={<CheckCircle2 className="size-4 text-emerald-600" />} value={released.length} detail="aguardando produção" tone="green">
+        </BoardColumn>}
+        {boardView === "cards" && visibleStages.released && <BoardColumn title="3. Liberadas" subtitle="Prontas para produzir" icon={<CheckCircle2 className="size-4 text-emerald-600" />} value={released.length} detail="aguardando produção" tone="green" collapsed={collapsedStages.released} onToggle={() => setCollapsedStages((current) => ({ ...current, released: !current.released }))}>
           {released.length ? visibleReleased.map((cycle) => <ReleasedCard key={cycle.id} cycle={cycle} onRelocate={() => openRelocate(cycle)} />) : <Empty text="Nenhuma ferramenta liberada aguardando produção." />}
           <Pager page={Math.min(releasedPage, releasedPages)} pages={releasedPages} onChange={setReleasedPage} />
-        </BoardColumn>
+        </BoardColumn>}
       </div>
+      {boardView === "map" && (visibleStages.heating || visibleStages.released) && <OvenMap ovens={visibleOvens} heating={visibleStages.heating ? heating : []} released={visibleStages.released ? released : []} now={now} onRelease={(cycle) => { setReleaseCycle(cycle); setReleaseReason(""); setDialogProblem(""); }} onRelocate={openRelocate} />}
 
       <Dialog open={!!selected} onOpenChange={(open) => !open && setSelected(null)}>
         <DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>Entrada da ferramenta no forno</DialogTitle><DialogDescription>{selected?.tool} · Prensa {machineLabel(selected?.machine || "")} · {selected?.orders.length || 0} item(ns) vinculados</DialogDescription></DialogHeader>
@@ -314,8 +347,24 @@ export function ToolOvenBoard() {
   );
 }
 
-function BoardColumn({ title, subtitle, icon, value, detail, tone = "slate", children }: { title: string; subtitle: string; icon: React.ReactNode; value: number; detail: string; tone?: "slate" | "orange" | "green"; children: React.ReactNode }) {
-  return <section className="min-w-0 overflow-hidden rounded-2xl border bg-white shadow-sm"><header className="flex min-h-14 items-center justify-between gap-2 border-b px-3 py-2"><div className="flex min-w-0 items-center gap-2"><span className={cn("grid size-8 shrink-0 place-items-center rounded-lg", tone === "orange" ? "bg-orange-50" : tone === "green" ? "bg-emerald-50" : "bg-slate-50")}>{icon}</span><div className="min-w-0"><h2 className="truncate font-heading text-sm font-bold text-slate-900">{title}</h2><p className="truncate text-[11px] text-slate-500">{subtitle}</p></div></div><div className="shrink-0 text-right"><p className={cn("text-xl font-black leading-none", tone === "orange" ? "text-orange-600" : tone === "green" ? "text-emerald-600" : "text-slate-950")}>{value}</p><p className="mt-0.5 text-[9px] text-slate-400">{detail}</p></div></header><div className="space-y-2 p-3">{children}</div></section>;
+function OvenMap({ ovens, heating, released, now, onRelease, onRelocate }: { ovens: ToolOven[]; heating: HeatingCycle[]; released: HeatingCycle[]; now: number; onRelease: (cycle: HeatingCycle) => void; onRelocate: (cycle: HeatingCycle) => void }) {
+  const cycles = [...heating, ...released];
+  return <section className="rounded-2xl border bg-white p-3 shadow-sm">
+    <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h2 className="font-heading text-sm font-bold text-slate-900">Mapa do forno</h2><p className="text-[11px] text-slate-500">Visão rápida das vagas ocupadas e livres. Selecione uma vaga ocupada para agir.</p></div><div className="flex items-center gap-3 text-[10px] font-semibold text-slate-500"><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-orange-500" />Aquecendo</span><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-emerald-500" />Liberada</span><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full border border-slate-300 bg-white" />Livre</span></div></div>
+    {ovens.length ? <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{ovens.map((oven) => {
+      const ovenCycles = cycles.filter((cycle) => cycle.oven_id === oven.id);
+      const byPosition = new Map(ovenCycles.map((cycle) => [cycle.oven_position, cycle]));
+      return <div key={oven.id} className="rounded-xl border bg-slate-50/70 p-2.5"><div className="mb-2 flex items-center justify-between"><div><p className="text-xs font-black text-slate-900">{oven.name}</p><p className="text-[10px] text-slate-500">Prensa {machineLabel(oven.machine_code)} · {ovenCycles.length}/{oven.position_count} ocupadas</p></div><span className="rounded-full bg-white px-2 py-1 text-[10px] font-bold text-slate-500">{oven.position_count - ovenCycles.length} livres</span></div><div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">{Array.from({ length: oven.position_count }, (_, index) => index + 1).map((position) => { const cycle = byPosition.get(position); if (!cycle) return <div key={position} className="flex min-h-16 flex-col justify-between rounded-lg border border-dashed border-slate-200 bg-white p-2"><span className="text-[9px] font-bold text-slate-400">Vaga {position}</span><span className="text-[10px] text-slate-400">Livre</span></div>; const isHeating = cycle.status === "heating"; const ready = isHeating && now >= new Date(cycle.expected_ready_at).getTime(); return <button key={position} type="button" onClick={() => isHeating ? onRelease(cycle) : onRelocate(cycle)} className={cn("min-h-16 rounded-lg border p-2 text-left transition hover:-translate-y-0.5 hover:shadow-sm", isHeating ? ready ? "border-emerald-200 bg-emerald-50" : "border-orange-200 bg-orange-50" : "border-emerald-200 bg-emerald-50/80")} title={isHeating ? "Abrir opções de liberação" : "Abrir opções da ferramenta liberada"}><div className="flex items-start justify-between gap-1"><span className="text-[9px] font-bold text-slate-500">Vaga {position}</span><span className={cn("size-2 rounded-full", isHeating ? ready ? "bg-emerald-500" : "bg-orange-500" : "bg-emerald-500")} /></div><p className="mt-1 truncate font-mono text-xs font-black text-slate-900">{cycle.tool_code}</p><p className="truncate text-[9px] text-slate-500">{isHeating ? ready ? "Pronta" : duration(new Date(cycle.expected_ready_at).getTime() - now) : "Liberada"}</p></button>; })}</div></div>;
+    })}</div> : <Empty text="Nenhum forno cadastrado para esta prensa." />}
+    <p className="mt-3 text-[10px] text-slate-400">Clique em uma vaga aquecendo para liberar/justificar, ou em uma vaga liberada para realocar a ferramenta.</p>
+  </section>;
+}
+
+function BoardColumn({ title, subtitle, icon, value, detail, tone = "slate", children, collapsed = false, onToggle }: { title: string; subtitle: string; icon: React.ReactNode; value: number; detail: string; tone?: "slate" | "orange" | "green"; children: React.ReactNode; collapsed?: boolean; onToggle?: () => void }) {
+  return <section className={cn("min-w-0 overflow-hidden rounded-2xl border bg-white shadow-sm", collapsed && "self-start")}><header className="flex min-h-14 items-center justify-between gap-2 border-b px-3 py-2"><div className="flex min-w-0 items-center gap-2"><span className={cn("grid size-8 shrink-0 place-items-center rounded-lg", tone === "orange" ? "bg-orange-50" : tone === "green" ? "bg-emerald-50" : "bg-slate-50")}>{icon}</span><div className="min-w-0"><h2 className="truncate font-heading text-sm font-bold text-slate-900">{title}</h2><p className="truncate text-[11px] text-slate-500">{subtitle}</p></div></div><div className="flex shrink-0 items-center gap-2 text-right"><div><p className={cn("text-xl font-black leading-none", tone === "orange" ? "text-orange-600" : tone === "green" ? "text-emerald-600" : "text-slate-950")}>{value}</p><p className="mt-0.5 text-[9px] text-slate-400">{detail}</p></div>{onToggle && <button type="button" onClick={onToggle} className="grid size-7 place-items-center rounded-lg border text-slate-500 transition hover:bg-slate-50" aria-label={collapsed ? `Expandir ${title}` : `Recolher ${title}`}>{collapsed ? <ChevronDown className="size-4" /> : <ChevronUp className="size-4" />}</button>}</div></header>{!collapsed && <div className="space-y-2 p-3">{children}</div>}</section>;
+}
+function StageToggle({ active, tone, onClick, children }: { active: boolean; tone: "slate" | "orange" | "green"; onClick: () => void; children: React.ReactNode }) {
+  return <button type="button" onClick={onClick} aria-pressed={active} className={cn("inline-flex h-7 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-bold transition", active ? tone === "orange" ? "border-orange-300 bg-orange-50 text-orange-700" : tone === "green" ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-slate-300 bg-slate-100 text-slate-800" : "border-slate-200 bg-white text-slate-400 hover:bg-slate-50")}>{children}</button>;
 }
 function AvailableCard({ group, onChoose }: { group: ToolGroup; onChoose: () => void }) {
   const plans = [...new Set(group.orders.map((order) => order.plan_code).filter(Boolean))];

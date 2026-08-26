@@ -19,7 +19,9 @@ export function LoginForm() {
     setLoading(false);
     if (!response.ok) { setError(result.error || "Não foi possível entrar."); return; }
     const next = search.get("next");
-    router.replace(result.mustChangePassword ? "/perfil?trocar=1" : next?.startsWith("/") ? next : "/dashboard");
+    // O acesso sempre começa no Centro de operações. A troca de senha continua
+    // disponível no perfil, mas não deve tirar o usuário do fluxo operacional.
+    router.replace(next?.startsWith("/") ? next : "/dashboard");
     router.refresh();
   }
 
