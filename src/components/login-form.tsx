@@ -27,9 +27,9 @@ export function LoginForm() {
 
   return <main className="grid min-h-screen lg:grid-cols-[1.05fr_.95fr]">
     <section className="relative hidden overflow-hidden bg-[#111927] p-12 text-white grid-noise lg:flex lg:flex-col lg:justify-between">
-      <div className="flex items-center gap-3"><span className="grid size-12 place-items-center rounded-2xl bg-orange-500"><Layers3 className="size-6" /></span><div><p className="font-heading text-xl font-extrabold">Alum<span className="text-orange-500">MES</span></p><p className="text-[10px] uppercase tracking-[.22em] text-slate-400">Extrusion Intelligence</p></div></div>
+      <div className="flex items-center gap-3"><span className="grid size-12 place-items-center rounded-2xl bg-orange-500"><Layers3 className="size-6" /></span><div><p className="font-heading text-xl font-extrabold">Tecno<span className="text-orange-500">MES</span></p><p className="text-[10px] uppercase tracking-[.22em] text-slate-400">Extrusion Intelligence</p></div></div>
       <div className="max-w-xl"><span className="rounded-full border border-orange-400/20 bg-orange-500/10 px-3 py-1 text-xs font-semibold text-orange-300">Operação rastreável</span><h1 className="mt-6 font-heading text-5xl font-extrabold leading-[1.08]">Cada ação ligada ao operador certo.</h1><p className="mt-5 max-w-lg text-base leading-7 text-slate-400">Acesse o planejamento, forno, produção e apontamentos com sua identificação individual.</p></div>
-      <p className="text-xs text-slate-500">AlumMES V1 · Acesso interno Tecnoperfil</p>
+      <p className="text-xs text-slate-500">TecnoMES V1 · Acesso interno Tecnoperfil</p>
     </section>
     <section className="grid place-items-center bg-[#f8f7f4] p-5"><form onSubmit={submit} className="w-full max-w-md rounded-3xl border bg-white p-7 shadow-xl shadow-slate-200/60 sm:p-9">
       <div className="lg:hidden"><span className="grid size-12 place-items-center rounded-2xl bg-orange-500 text-white"><Layers3 className="size-6" /></span></div>

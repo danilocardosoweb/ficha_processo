@@ -7,7 +7,7 @@ const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"]
 const manrope = Manrope({ variable: "--font-manrope", subsets: ["latin"], preload: false });
 
 export const metadata: Metadata = {
-  title: { default: "AlumMES", template: "%s | AlumMES" },
+  title: { default: "TecnoMES", template: "%s | TecnoMES" },
   description: "Sistema de execucao da manufatura para extrusao de aluminio.",
 };
 

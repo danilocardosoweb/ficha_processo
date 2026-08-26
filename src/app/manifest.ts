@@ -2,8 +2,8 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "AlumMES - Extrusion Intelligence",
-    short_name: "AlumMES",
+    name: "TecnoMES - Extrusion Intelligence",
+    short_name: "TecnoMES",
     description: "Sistema MES para extrusão de alumínio com consulta operacional offline.",
     start_url: "/dashboard",
     display: "standalone",
@@ -12,4 +12,3 @@ export default function manifest(): MetadataRoute.Manifest {
     icons: [{ src: "/favicon.ico", sizes: "any", type: "image/x-icon" }],
   };
 }
-
