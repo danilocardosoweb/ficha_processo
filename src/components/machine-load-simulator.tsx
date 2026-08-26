@@ -5,6 +5,7 @@ import { Boxes, CalendarClock, Clock3, Flame, Gauge, GripVertical, Loader2, Pack
 import { Button } from "@/components/ui/button";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { simulateMachineLoad, type LoadOrderInput, type MachineLoadSettings, type ProductivitySource, type WorkShiftInput } from "@/modules/planning/machine-load-simulator";
+import { useCurrentUser } from "@/components/current-user-provider";
 
 interface RawOrder {
   id: string; order_number: string; plan_code: string | null; machine_code: string; tool_code: string; alloy_code: string | null;
@@ -25,6 +26,8 @@ const formatNumber = (value: number, digits = 1) => value.toLocaleString("pt-BR"
 const formatDuration = (minutes: number) => `${Math.floor(minutes / 60)}h ${String(Math.round(minutes % 60)).padStart(2, "0")}min`;
 const formatDateTime = (date: Date | null) => date ? date.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
 const machineLabel = (code: string) => code === "18" ? "Prensa 1.8" : code === "19" ? "Prensa 1.9" : `Prensa ${code}`;
+const toInputDateTime = (date: Date) => { const pad = (value: number) => String(value).padStart(2, "0"); return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`; };
+const parseInputDateTime = (value: string) => { const [datePart, timePart] = value.split("T"); if (!datePart || !timePart) return null; const [year, month, day] = datePart.split("-").map(Number); const [hours, minutes] = timePart.split(":").map(Number); const date = new Date(year, month - 1, day, hours, minutes); return Number.isNaN(date.getTime()) ? null : date; };
 const sourceLabel: Record<ProductivitySource, string> = { simplificada: "Ult. Prod.", ficha: "Ficha", ferramenta: "Histórico", padrao: "Padrão" };
 
 function readSheetProductivity(parameters: Record<string, unknown> | null) {
@@ -33,6 +36,9 @@ function readSheetProductivity(parameters: Record<string, unknown> | null) {
 }
 
 export function MachineLoadSimulator() {
+  const { role, machine_codes: userMachineCodes } = useCurrentUser();
+  const canPlan = role === "admin" || role === "pcp";
+  const allowedMachines = useMemo(() => canPlan || !userMachineCodes?.length ? null : new Set(userMachineCodes), [canPlan, userMachineCodes]);
   const [orders, setOrders] = useState<LoadOrderInput[]>([]);
   const [settings, setSettings] = useState<Record<string, MachineLoadSettings>>({});
   const [shifts, setShifts] = useState<WorkShiftInput[]>([]);
@@ -43,6 +49,7 @@ export function MachineLoadSimulator() {
   const [machine, setMachine] = useState("all");
   const [tab, setTab] = useState<"timeline" | "billets">("timeline");
   const [startedAt, setStartedAt] = useState<Date | null>(null);
+  const [startInput, setStartInput] = useState("");
 
   const load = useCallback(async function load() {
     setLoading(true); setError("");
@@ -86,7 +93,9 @@ export function MachineLoadSimulator() {
       });
       setOrders(input); setSettings(settingMap);
       setShifts((productionSettings.shifts ?? []).map((shift) => ({ id: shift.id, code: shift.code, name: shift.name, startTime: shift.start_time.slice(0, 5), endTime: shift.end_time.slice(0, 5), breakMinutes: shift.break_minutes, machineCodes: shift.machine_codes ?? [], isActive: shift.is_active })));
-      setStartedAt(new Date());
+      const initialStart = new Date();
+      setStartedAt(initialStart);
+      setStartInput(toInputDateTime(initialStart));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Não foi possível montar a simulação.");
     } finally { setLoading(false); }
@@ -96,7 +105,10 @@ export function MachineLoadSimulator() {
     const timer = window.setTimeout(() => void load(), 0);
     return () => window.clearTimeout(timer);
   }, [load]);
-  const visibleOrders = useMemo(() => machine === "all" ? orders : orders.filter((order) => order.machineCode === machine), [orders, machine]);
+  const visibleOrders = useMemo(() => {
+    const assigned = orders.filter((order) => !allowedMachines || allowedMachines.has(order.machineCode));
+    return machine === "all" ? assigned : assigned.filter((order) => order.machineCode === machine);
+  }, [orders, machine, allowedMachines]);
   const orderedVisibleOrders = useMemo(() => {
     if (mode !== "manual") return visibleOrders;
     return visibleOrders.map((order) => {
@@ -105,7 +117,7 @@ export function MachineLoadSimulator() {
       return { ...order, sequence: position >= 0 ? position + 1 : machineOrder.length + order.sequence };
     });
   }, [visibleOrders, mode, manualOrder]);
-  const machineOptions = [...new Set(orders.map((order) => order.machineCode))].sort();
+  const machineOptions = [...new Set(orders.map((order) => order.machineCode).filter((code) => !allowedMachines || allowedMachines.has(code)))].sort();
   const simulationState = useMemo(() => {
     if (!startedAt) return { simulation: null, problem: "" };
     try { return { simulation: simulateMachineLoad(orderedVisibleOrders, settings, startedAt, mode === "manual" ? "fifo" : mode, shifts), problem: "" }; }
@@ -141,7 +153,8 @@ export function MachineLoadSimulator() {
 
   return <div className="space-y-4">
     <section className="flex flex-wrap items-center gap-2 rounded-2xl border bg-white p-3 shadow-sm">
-      <select value={machine} onChange={(event) => setMachine(event.target.value)} className="h-10 rounded-xl border bg-white px-3 text-sm font-semibold"><option value="all">Todas as prensas</option>{machineOptions.map((code) => <option key={code} value={code}>{machineLabel(code)}</option>)}</select>
+      <select value={machine} onChange={(event) => setMachine(event.target.value)} className="h-10 rounded-xl border bg-white px-3 text-sm font-semibold"><option value="all">{allowedMachines ? "Minhas prensas" : "Todas as prensas"}</option>{machineOptions.map((code) => <option key={code} value={code}>{machineLabel(code)}</option>)}</select>
+      <label className="flex h-10 items-center gap-2 rounded-xl border bg-white px-3 text-xs font-semibold text-slate-600">Início da simulação<input type="datetime-local" value={startInput} onChange={(event) => { setStartInput(event.target.value); const parsed = parseInputDateTime(event.target.value); if (parsed) setStartedAt(parsed); }} className="min-w-0 bg-transparent text-sm font-bold text-slate-900 outline-none" /></label>
       <div className="flex rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setMode("fifo")} className={`rounded-lg px-3 py-2 text-xs font-bold ${mode === "fifo" ? "bg-white shadow-sm" : "text-slate-500"}`}>FIFO</button><button type="button" onClick={() => setMode("optimized")} className={`rounded-lg px-3 py-2 text-xs font-bold ${mode === "optimized" ? "bg-white shadow-sm" : "text-slate-500"}`}>Sequência sugerida</button><button type="button" onClick={activateManualMode} className={`flex items-center gap-1 rounded-lg px-3 py-2 text-xs font-bold ${mode === "manual" ? "bg-orange-500 text-white shadow-sm" : "text-slate-500"}`}><GripVertical className="size-3.5" />Sequência manual</button></div>
       <span className="ml-auto text-xs text-slate-500">Base: {formatDateTime(startedAt)}</span>
       <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-bold text-emerald-700">{shifts.filter((shift) => shift.isActive).map((shift) => `${shift.code} ${shift.startTime}–${shift.endTime}`).join(" · ")}</span>
@@ -155,6 +168,7 @@ export function MachineLoadSimulator() {
       <Metric icon={PackageOpen} label="Barras a preparar" value={`${simulation.totalBars}`} tone="violet" />
       <Metric icon={Route} label="Itens na sequência" value={`${simulation.machines.reduce((sum, item) => sum + item.items.length, 0)}`} tone="green" />
     </section>
+    <AlloyWarnings machines={simulation.machines} />
 
     <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
       <div className="flex items-center justify-between border-b px-4 py-3"><div><h2 className="font-heading font-bold text-slate-900">Simulação operacional</h2><p className="text-xs text-slate-500">Prensa + ferramenta/forno + tarugo/liga.</p></div><div className="flex rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setTab("timeline")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "timeline" ? "bg-white shadow-sm" : "text-slate-500"}`}><Clock3 className="mr-1 inline size-3.5" />Linha do tempo</button><button type="button" onClick={() => setTab("billets")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "billets" ? "bg-white shadow-sm" : "text-slate-500"}`}><PackageOpen className="mr-1 inline size-3.5" />Carga de tarugo</button></div></div>
@@ -167,6 +181,17 @@ export function MachineLoadSimulator() {
 function Metric({ icon: Icon, label, value, tone = "slate" }: { icon: typeof Gauge; label: string; value: string; tone?: "slate" | "orange" | "blue" | "violet" | "green" }) {
   const colors = { slate: "bg-slate-100 text-slate-700", orange: "bg-orange-50 text-orange-600", blue: "bg-blue-50 text-blue-600", violet: "bg-violet-50 text-violet-600", green: "bg-emerald-50 text-emerald-600" };
   return <div className="flex items-center gap-3 rounded-2xl border bg-white p-4 shadow-sm"><span className={`grid size-10 place-items-center rounded-xl ${colors[tone]}`}><Icon className="size-5" /></span><div><p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</p><p className="text-lg font-black text-slate-900">{value}</p></div></div>;
+}
+
+function AlloyWarnings({ machines }: { machines: ReturnType<typeof simulateMachineLoad>["machines"] }) {
+  const transitions = machines.flatMap((machine) => machine.items.slice(1).flatMap((item, index) => {
+    const previous = machine.items[index];
+    if (previous.selectedAlloy === item.selectedAlloy || previous.billetBalanceAfterKg < 0.1) return [];
+    const accepted = item.alternativeAlloys.map((alloy) => alloy.trim().toUpperCase()).includes(previous.selectedAlloy.trim().toUpperCase());
+    return [{ machine: machine.machineCode, from: previous.selectedAlloy, to: item.selectedAlloy, balance: previous.billetBalanceAfterKg, accepted }];
+  }));
+  if (!transitions.length) return <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-800"><span className="grid size-6 place-items-center rounded-full bg-white font-black">✓</span><p><strong>Sequência eficiente de ligas.</strong> Não há sobra relevante antes de uma virada incompatível.</p></div>;
+  return <section className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-950"><div className="flex items-start gap-2"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-600" /><div><p className="font-bold">Atenção ao consumo de tarugo antes da troca de liga</p><div className="mt-1 space-y-1">{transitions.map((transition) => <p key={`${transition.machine}-${transition.from}-${transition.to}`}>Prensa {transition.machine}: sobram <strong>{formatNumber(transition.balance)} kg de {transition.from}</strong> antes de {transition.to}. {transition.accepted ? "A próxima ferramenta aceita essa liga como alternativa; confirme o uso." : "As ligas são incompatíveis: reordene a sequência ou distribua o saldo antes da virada."}</p>)}</div></div></div></section>;
 }
 
 function Timeline({ machines, manual, onMove }: {

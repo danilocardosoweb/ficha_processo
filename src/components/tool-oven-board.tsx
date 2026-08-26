@@ -92,7 +92,9 @@ function inferredToolType(orders: HeatingOrder[]): "solid" | "tubular" {
 }
 
 export function ToolOvenBoard() {
-  const { display_name: operatorName } = useCurrentUser();
+  const { display_name: operatorName, role, machine_codes: userMachineCodes } = useCurrentUser();
+  const canPlan = role === "admin" || role === "pcp";
+  const allowedMachines = useMemo(() => canPlan || !userMachineCodes?.length ? null : new Set(userMachineCodes), [canPlan, userMachineCodes]);
   const [orders, setOrders] = useState<HeatingOrder[]>([]);
   const [cycles, setCycles] = useState<HeatingCycle[]>([]);
   const [ovens, setOvens] = useState<ToolOven[]>([]);
@@ -144,13 +146,14 @@ export function ToolOvenBoard() {
       setMessage("");
     } catch (error) { setMessage(errorMessage(error)); }
     finally { if (!silent) setLoading(false); }
-  }, []);
+  }, [setMessage]);
 
   useEffect(() => { const initialLoad = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(initialLoad); }, [load]);
   useEffect(() => { const tick = () => setNow(Date.now()); const initialTick = window.setTimeout(tick, 0); const timer = window.setInterval(tick, 1000); return () => { window.clearTimeout(initialTick); window.clearInterval(timer); }; }, []);
   useEffect(() => { const timer = window.setInterval(() => void load(true), 15000); return () => window.clearInterval(timer); }, [load]);
 
   const linkedOrderIds = useMemo(() => new Set(cycles.flatMap((cycle) => cycle.tool_heating_cycle_orders.map((link) => link.production_order_id))), [cycles]);
+  const effectiveMachineFilter = machineFilter && (!allowedMachines || allowedMachines.has(machineFilter)) ? machineFilter : "";
   const available = useMemo(() => {
     const grouped = new Map<string, ToolGroup>();
     for (const order of orders) {
@@ -162,21 +165,21 @@ export function ToolOvenBoard() {
     }
     const normalized = query.trim().toUpperCase();
     return [...grouped.values()].filter((group) =>
-      (!machineFilter || group.machine === machineFilter) &&
+      (!effectiveMachineFilter || group.machine === effectiveMachineFilter) && (!allowedMachines || allowedMachines.has(group.machine)) &&
       (!normalized || `${group.tool} ${group.machine} ${group.orders.map((order) => `${order.plan_code} ${order.customer_name}`).join(" ")}`.toUpperCase().includes(normalized))
     );
-  }, [orders, linkedOrderIds, query, machineFilter]);
+  }, [orders, linkedOrderIds, query, effectiveMachineFilter, allowedMachines]);
   const heatingAll = cycles.filter((cycle) => cycle.status === "heating");
-  const heating = heatingAll.filter((cycle) => !machineFilter || cycle.machine_code === machineFilter);
-  const released = cycles.filter((cycle) => (!machineFilter || cycle.machine_code === machineFilter) && cycle.status === "released" && cycle.tool_heating_cycle_orders.some((link) => link.production_orders?.is_active && ["planned", "released", "paused"].includes(link.production_orders.status)));
-  const visibleOvens = ovens.filter((oven) => !machineFilter || oven.machine_code === machineFilter);
+  const heating = heatingAll.filter((cycle) => (!effectiveMachineFilter || cycle.machine_code === effectiveMachineFilter) && (!allowedMachines || allowedMachines.has(cycle.machine_code)));
+  const released = cycles.filter((cycle) => (!effectiveMachineFilter || cycle.machine_code === effectiveMachineFilter) && (!allowedMachines || allowedMachines.has(cycle.machine_code)) && cycle.status === "released" && cycle.tool_heating_cycle_orders.some((link) => link.production_orders?.is_active && ["planned", "released", "paused"].includes(link.production_orders.status)));
+  const visibleOvens = ovens.filter((oven) => (!effectiveMachineFilter || oven.machine_code === effectiveMachineFilter) && (!allowedMachines || allowedMachines.has(oven.machine_code)));
   const visibleCapacity = visibleOvens.reduce((total, oven) => total + oven.position_count, 0);
-  const entryOvens = ovens.filter((oven) => oven.machine_code === targetMachine);
+  const entryOvens = ovens.filter((oven) => oven.machine_code === targetMachine && (!allowedMachines || allowedMachines.has(oven.machine_code)));
   const selectedOven = ovens.find((oven) => oven.id === ovenId);
   const occupiedPositionMap = new Map(heatingAll.filter((cycle) => cycle.oven_id === ovenId).map((cycle) => [cycle.oven_position, cycle]));
   const allPositions = selectedOven ? Array.from({ length: selectedOven.position_count }, (_, index) => index + 1) : [];
   const relocateOven = ovens.find((oven) => oven.id === relocateOvenId);
-  const relocateOvens = ovens.filter((oven) => oven.machine_code === relocateMachine);
+  const relocateOvens = ovens.filter((oven) => oven.machine_code === relocateMachine && (!allowedMachines || allowedMachines.has(oven.machine_code)));
   const relocateOccupiedMap = new Map(heatingAll.filter((cycle) => cycle.oven_id === relocateOvenId && cycle.id !== relocateCycle?.id).map((cycle) => [cycle.oven_position, cycle]));
   const relocatePositions = relocateOven ? Array.from({ length: relocateOven.position_count }, (_, index) => index + 1) : [];
   const waitingPages = Math.max(1, Math.ceil(available.length / WAITING_PAGE_SIZE));
@@ -269,7 +272,7 @@ export function ToolOvenBoard() {
     <div className="space-y-3 md:-my-4">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div><div className="flex items-center gap-2"><p className="text-[10px] font-bold uppercase tracking-[.2em] text-orange-600">Produção · preparação</p><span className="hidden items-center text-xs text-slate-400 sm:inline-flex">Simplificada <ChevronRight className="size-3.5" /> aquecimento <ChevronRight className="size-3.5" /> produção</span></div><h1 className="mt-0.5 font-heading text-2xl font-bold text-slate-950">Forno de ferramentas</h1></div>
-        <div className="flex items-center gap-2"><select value={machineFilter} onChange={(event) => { setMachineFilter(event.target.value); setWaitingPage(1); setHeatingPage(1); setReleasedPage(1); }} className="h-9 rounded-lg border bg-white px-3 text-sm font-semibold"><option value="">Todas as prensas</option><option value="18">Prensa 1.8</option><option value="19">Prensa 1.9</option></select><button type="button" onClick={() => void load()} disabled={loading} className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border bg-white px-2.5 text-sm font-medium transition hover:bg-slate-100 disabled:pointer-events-none disabled:opacity-50"><RefreshCw className={cn("size-4", loading && "animate-spin")} />Atualizar</button></div>
+        <div className="flex items-center gap-2"><select value={effectiveMachineFilter} onChange={(event) => { setMachineFilter(event.target.value); setWaitingPage(1); setHeatingPage(1); setReleasedPage(1); }} className="h-9 rounded-lg border bg-white px-3 text-sm font-semibold"><option value="">{allowedMachines ? "Minhas prensas" : "Todas as prensas"}</option>{["18", "19"].filter((code) => !allowedMachines || allowedMachines.has(code)).map((code) => <option key={code} value={code}>{machineLabel(code)}</option>)}</select><button type="button" onClick={() => void load()} disabled={loading} className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border bg-white px-2.5 text-sm font-medium transition hover:bg-slate-100 disabled:pointer-events-none disabled:opacity-50"><RefreshCw className={cn("size-4", loading && "animate-spin")} />Atualizar</button></div>
       </header>
       {message && <div className={cn("rounded-lg border px-3 py-2 text-sm", /não|falha|erro|ainda/i.test(message) ? "border-red-200 bg-red-50 text-red-700" : "border-emerald-200 bg-emerald-50 text-emerald-800")}>{message}</div>}
 
@@ -309,7 +312,7 @@ export function ToolOvenBoard() {
         <DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>Entrada da ferramenta no forno</DialogTitle><DialogDescription>{selected?.tool} · Prensa {machineLabel(selected?.machine || "")} · {selected?.orders.length || 0} item(ns) vinculados</DialogDescription></DialogHeader>
           <div className="space-y-4 py-2">
             <div><span className="text-sm font-semibold">Tipo da ferramenta</span><div className="mt-2 grid grid-cols-2 gap-2"><button type="button" onClick={() => setToolType("solid")} className={cn("rounded-xl border px-3 py-2 text-sm font-bold", toolType === "solid" ? "border-orange-500 bg-orange-50 text-orange-700" : "bg-white")}>Sólida · 400 °C</button><button type="button" onClick={() => setToolType("tubular")} className={cn("rounded-xl border px-3 py-2 text-sm font-bold", toolType === "tubular" ? "border-orange-500 bg-orange-50 text-orange-700" : "bg-white")}>Tubular · 420 °C</button></div></div>
-            <label className="block text-sm font-semibold">Prensa de destino<select value={targetMachine} onChange={(event) => { setTargetMachine(event.target.value); setOvenId(""); setOvenPosition(""); setDialogProblem(""); }} className="mt-1 h-10 w-full rounded-xl border bg-white px-3 text-sm"><option value="18">Prensa 1.8</option><option value="19">Prensa 1.9</option></select><span className="mt-1 block text-xs font-normal text-slate-500">Cada prensa possui 3 fornos próprios, com 7 vagas em cada um.</span></label>
+            <label className="block text-sm font-semibold">Prensa de destino<select value={targetMachine} onChange={(event) => { setTargetMachine(event.target.value); setOvenId(""); setOvenPosition(""); setDialogProblem(""); }} className="mt-1 h-10 w-full rounded-xl border bg-white px-3 text-sm">{["18", "19"].filter((code) => !allowedMachines || allowedMachines.has(code)).map((code) => <option key={code} value={code}>{machineLabel(code)}</option>)}</select><span className="mt-1 block text-xs font-normal text-slate-500">Cada prensa possui 3 fornos próprios, com 7 vagas em cada um.</span></label>
             <div className="grid grid-cols-2 gap-3"><label className="block text-sm font-semibold">Forno da Prensa {machineLabel(targetMachine)}<select value={ovenId} onChange={(event) => { setOvenId(event.target.value); setOvenPosition(""); setDialogProblem(""); }} className="mt-1 h-10 w-full rounded-xl border bg-white px-3 text-sm" autoFocus><option value="">Selecione</option>{entryOvens.map((oven) => <option key={oven.id} value={oven.id}>{oven.name}</option>)}</select></label><label className="block text-sm font-semibold">Posição<select value={ovenPosition} onChange={(event) => { setOvenPosition(event.target.value); setDialogProblem(""); }} disabled={!ovenId} className="mt-1 h-10 w-full rounded-xl border bg-white px-3 text-sm disabled:bg-slate-100"><option value="">Selecione</option>{allPositions.map((position) => { const occupant = occupiedPositionMap.get(position); return <option key={position} value={position} disabled={!!occupant}>Posição {position}{occupant ? ` — OCUPADA: ${occupant.tool_code} · P${machineLabel(occupant.machine_code)}` : " — livre"}</option>; })}</select></label></div>
             <div className="flex gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900"><ShieldAlert className="mt-0.5 size-4 shrink-0" /><span><b>Uma ferramenta por vaga.</b> A posição só fica livre após retirar ou realocar a ferramenta anterior.</span></div>
             {ovenId && allPositions.length > 0 && allPositions.every((position) => occupiedPositionMap.has(position)) && <p className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">Este forno está lotado. Escolha outro forno ou realoque uma ferramenta.</p>}

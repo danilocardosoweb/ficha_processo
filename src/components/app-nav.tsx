@@ -8,6 +8,7 @@ import { BrandMark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
+import { useCurrentUser } from "@/components/current-user-provider";
 
 const navigationGroups = [
   { label: "Operação", items: [
@@ -43,6 +44,10 @@ function NavLink({ label, href, icon: Icon, active, compact, onNavigate }: {
 
 function NavContent({ compact = false, onNavigate, onToggle }: { compact?: boolean; onNavigate?: () => void; onToggle?: () => void }) {
   const pathname = usePathname();
+  const user = useCurrentUser();
+  const isPlanningRole = user.role === "admin" || user.role === "pcp";
+  const allowedMachines = user.machine_codes ?? [];
+  const canSeeMachine = (href: string) => isPlanningRole || href !== "/forno" || allowedMachines.length > 0;
   return (
     <div className="flex h-full flex-col overflow-hidden bg-[#111927] text-slate-200">
       <div className={cn("flex h-24 shrink-0 items-center transition-all", compact ? "justify-center px-3" : "px-6")}><BrandMark compact={compact} /></div>
@@ -51,7 +56,7 @@ function NavContent({ compact = false, onNavigate, onToggle }: { compact?: boole
           <div key={group.label} className={cn(groupIndex > 0 && "mt-5")}>
             {!compact && <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-[.2em] text-slate-600">{group.label}</p>}
             <div className="space-y-1">
-              {group.items.map((item) => {
+              {group.items.filter((item) => (isPlanningRole || !["/importar", "/planejamento", "/carga-maquina"].includes(item.href)) && canSeeMachine(item.href)).map((item) => {
                 const active = pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(item.href));
                 return <NavLink key={item.href} {...item} active={active} compact={compact} onNavigate={onNavigate} />;
               })}
