@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, Boxes, ChartNoAxesCombined, ChevronLeft, ChevronRight, Flame, Gauge, Import, Menu, PackageSearch, Settings, ShieldCheck, UnlockKeyhole, Wrench } from "lucide-react";
+import { BarChart3, Boxes, ChartNoAxesCombined, ChevronLeft, ChevronRight, Flame, Gauge, Import, Menu, PackageSearch, Settings, ShieldCheck, TimerReset, UnlockKeyhole, Wrench } from "lucide-react";
 import { BrandMark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -17,6 +17,7 @@ const navigationGroups = [
     { label: "Importar simplificada", href: "/importar", icon: Import },
     { label: "Forno de ferramentas", href: "/forno", icon: Flame },
     { label: "Carteira e planejamento", href: "/planejamento", icon: ChartNoAxesCombined },
+    { label: "Carga Máquina", href: "/carga-maquina", icon: TimerReset },
   ] },
   { label: "Acompanhamento", items: [
     { label: "Manutenção", href: "/manutencao", icon: Wrench },
@@ -75,7 +76,7 @@ function NavContent({ compact = false, onNavigate, onToggle }: { compact?: boole
   );
 }
 
-export function DesktopNav({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+export function DesktopNav({ collapsed, onToggle }: { collapsed: boolean; onToggle?: () => void }) {
   return <aside className={cn("fixed inset-y-0 left-0 z-30 hidden transition-[width] duration-200 lg:block", collapsed ? "w-[72px]" : "w-64")}><NavContent compact={collapsed} onToggle={onToggle} /></aside>;
 }
 

@@ -256,7 +256,7 @@ export function ToolOvenBoard() {
       </header>
       {message && <div className={cn("rounded-lg border px-3 py-2 text-sm", /não|falha|erro|ainda/i.test(message) ? "border-red-200 bg-red-50 text-red-700" : "border-emerald-200 bg-emerald-50 text-emerald-800")}>{message}</div>}
 
-      <div className="grid gap-4 xl:grid-cols-[.9fr_1.1fr_1fr]">
+      <div className="grid min-w-0 gap-3 xl:grid-cols-[.88fr_1.12fr_1fr]">
         <BoardColumn title="1. Aguardando" subtitle="Simplificadas ativas" icon={<PackageSearch className="size-4" />} value={available.length} detail="para o forno">
           <div className="relative mb-2"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><Input value={query} onChange={(event) => { setQuery(event.target.value); setWaitingPage(1); }} placeholder="Ferramenta, Plano ou cliente" className="h-9 pl-9" /></div>
           {loading ? <Loading /> : available.length ? visibleAvailable.map((group) => <AvailableCard key={group.key} group={group} onChoose={() => { setSelected(group); setToolType(inferredToolType(group.orders)); setTargetMachine(group.machine); setOvenId(""); setOvenPosition(""); setMessage(""); setDialogProblem(""); }} />) : <Empty text="Nenhuma ferramenta aguardando forno." />}
@@ -315,7 +315,7 @@ export function ToolOvenBoard() {
 }
 
 function BoardColumn({ title, subtitle, icon, value, detail, tone = "slate", children }: { title: string; subtitle: string; icon: React.ReactNode; value: number; detail: string; tone?: "slate" | "orange" | "green"; children: React.ReactNode }) {
-  return <section className="overflow-hidden rounded-2xl border bg-white shadow-sm"><header className="flex min-h-16 items-center justify-between gap-3 border-b px-3 py-2.5"><div className="flex min-w-0 items-center gap-2.5"><span className={cn("grid size-8 shrink-0 place-items-center rounded-lg", tone === "orange" ? "bg-orange-50" : tone === "green" ? "bg-emerald-50" : "bg-slate-50")}>{icon}</span><div className="min-w-0"><h2 className="truncate font-heading text-sm font-bold text-slate-900">{title}</h2><p className="truncate text-[11px] text-slate-500">{subtitle}</p></div></div><div className="shrink-0 text-right"><p className={cn("text-2xl font-black leading-none", tone === "orange" ? "text-orange-600" : tone === "green" ? "text-emerald-600" : "text-slate-950")}>{value}</p><p className="mt-1 text-[10px] text-slate-400">{detail}</p></div></header><div className="space-y-2 p-3">{children}</div></section>;
+  return <section className="min-w-0 overflow-hidden rounded-2xl border bg-white shadow-sm"><header className="flex min-h-14 items-center justify-between gap-2 border-b px-3 py-2"><div className="flex min-w-0 items-center gap-2"><span className={cn("grid size-8 shrink-0 place-items-center rounded-lg", tone === "orange" ? "bg-orange-50" : tone === "green" ? "bg-emerald-50" : "bg-slate-50")}>{icon}</span><div className="min-w-0"><h2 className="truncate font-heading text-sm font-bold text-slate-900">{title}</h2><p className="truncate text-[11px] text-slate-500">{subtitle}</p></div></div><div className="shrink-0 text-right"><p className={cn("text-xl font-black leading-none", tone === "orange" ? "text-orange-600" : tone === "green" ? "text-emerald-600" : "text-slate-950")}>{value}</p><p className="mt-0.5 text-[9px] text-slate-400">{detail}</p></div></header><div className="space-y-2 p-3">{children}</div></section>;
 }
 function AvailableCard({ group, onChoose }: { group: ToolGroup; onChoose: () => void }) {
   const plans = [...new Set(group.orders.map((order) => order.plan_code).filter(Boolean))];
@@ -338,7 +338,7 @@ function HeatingCard({ cycle, now, saving, onRelease, onCancel, onRelocate }: { 
   const progress = Math.min(100, Math.max(0, ((now - start) / (end - start)) * 100));
   const orders = cycle.tool_heating_cycle_orders.map((link) => link.production_orders).filter(Boolean) as HeatingOrder[];
   return (
-    <article className={cn("rounded-xl border p-3", expired ? "border-red-300 bg-red-50" : ready ? "border-emerald-300 bg-emerald-50/50" : "border-orange-200 bg-orange-50/40")}>
+    <article className={cn("@container rounded-xl border p-3", expired ? "border-red-300 bg-red-50" : ready ? "border-emerald-300 bg-emerald-50/50" : "border-orange-200 bg-orange-50/40")}>
       <div className="flex justify-between gap-3">
         <div>
           <p className="font-mono text-lg font-black text-slate-950">{cycle.tool_code}</p>
@@ -349,16 +349,22 @@ function HeatingCard({ cycle, now, saving, onRelease, onCancel, onRelocate }: { 
           {expired ? "Limite excedido" : ready ? "Tempo atingido" : "Aquecendo"}
         </span>
       </div>
-      <div className="mt-2 rounded-xl bg-white px-3 py-2.5 shadow-sm">
-        <div className="flex items-end justify-between gap-3"><div><p className="text-[9px] font-bold uppercase tracking-wider text-slate-400">{expired ? "Excedeu 24 horas há" : ready ? "Pronta há" : "Tempo restante"}</p><p className={cn("font-mono text-2xl font-black leading-tight", expired ? "text-red-600" : ready ? "text-emerald-600" : "text-orange-600")}>{duration(Math.abs((expired ? maximum : end) - now))}</p></div><p className="pb-0.5 text-[10px] text-slate-500">{orders.length} item(ns) · Plano {[...new Set(orders.map((order) => order.plan_code))].join(", ")}</p></div>
-        <ThermalCurve cycle={cycle} now={now} progress={progress} ready={ready} expired={expired} />
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
-          <div className={cn("h-full rounded-full transition-all", expired ? "bg-red-500" : ready ? "bg-emerald-500" : "bg-orange-500")} style={{ width: `${progress}%` }} />
-        </div>
-        <div className="mt-2 grid grid-cols-3 gap-2 text-center text-[9px]">
-          <Time label="Entrada real" value={clock(cycle.entered_at)} />
-          <Time label="Liberação" value={clock(cycle.expected_ready_at)} />
-          <Time label="Limite 24 h" value={clock(cycle.maximum_due_at)} />
+      <div className="mt-2 rounded-xl bg-white p-2.5 shadow-sm">
+        <div className="grid gap-2 @[420px]:grid-cols-[minmax(132px,.72fr)_minmax(0,1.28fr)] @[420px]:items-center">
+          <div className="min-w-0">
+            <p className="text-[9px] font-bold uppercase tracking-wider text-slate-400">{expired ? "Excedeu 24 horas há" : ready ? "Pronta há" : "Tempo restante"}</p>
+            <p className={cn("whitespace-nowrap font-mono text-2xl font-black leading-tight", expired ? "text-red-600" : ready ? "text-emerald-600" : "text-orange-600")}>{duration(Math.abs((expired ? maximum : end) - now))}</p>
+            <p className="mt-0.5 truncate text-[10px] text-slate-500">{orders.length} item(ns) · Plano {[...new Set(orders.map((order) => order.plan_code))].join(", ")}</p>
+            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
+              <div className={cn("h-full rounded-full transition-all", expired ? "bg-red-500" : ready ? "bg-emerald-500" : "bg-orange-500")} style={{ width: `${progress}%` }} />
+            </div>
+            <div className="mt-2 grid grid-cols-3 gap-1 text-center text-[8px]">
+              <Time label="Entrada" value={clock(cycle.entered_at)} />
+              <Time label="Liberação" value={clock(cycle.expected_ready_at)} />
+              <Time label="Limite 24 h" value={clock(cycle.maximum_due_at)} />
+            </div>
+          </div>
+          <ThermalCurve cycle={cycle} now={now} progress={progress} ready={ready} expired={expired} />
         </div>
         {nearMaximum && <p className="mt-2 rounded-lg bg-amber-50 px-2 py-1.5 text-xs font-bold text-amber-700">Atenção: aproximação do limite máximo de permanência.</p>}
         {expired && <p className="mt-2 rounded-lg bg-red-50 px-2 py-1.5 text-xs font-bold text-red-700">Liberação bloqueada. Retire a ferramenta e encaminhe para avaliação.</p>}

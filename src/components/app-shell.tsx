@@ -12,12 +12,21 @@ const storageKey = "alummes-sidebar-collapsed";
 
 export function AppShell({ children, user }: { children: ReactNode; user: LocalUser }) {
   const [collapsed, setCollapsed] = useState(false);
+  const [compactViewport, setCompactViewport] = useState(false);
 
   useEffect(() => {
     const restore = window.setTimeout(() => {
       setCollapsed(window.localStorage.getItem(storageKey) === "true");
     }, 0);
     return () => window.clearTimeout(restore);
+  }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 1439px)");
+    const update = () => setCompactViewport(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
   }, []);
 
   function toggleSidebar() {
@@ -28,13 +37,15 @@ export function AppShell({ children, user }: { children: ReactNode; user: LocalU
     });
   }
 
+  const effectiveCollapsed = collapsed || compactViewport;
+
   return (
     <CurrentUserProvider user={user}><OperationalMessagesProvider><div className="min-h-screen bg-[#f6f5f2]">
-      <DesktopNav collapsed={collapsed} onToggle={toggleSidebar} />
+      <DesktopNav collapsed={effectiveCollapsed} onToggle={compactViewport ? undefined : toggleSidebar} />
       <div
         className={cn(
           "transition-[padding] duration-200",
-          collapsed ? "lg:pl-[72px]" : "lg:pl-64",
+          effectiveCollapsed ? "lg:pl-[72px]" : "lg:pl-64",
         )}
       >
         <AppHeader user={user} />

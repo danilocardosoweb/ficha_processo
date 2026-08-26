@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CalendarDays,
@@ -326,6 +326,7 @@ export function ProductionCockpit() {
   const [planHeatingLocations, setPlanHeatingLocations] = useState<PlanHeatingLocation[]>([]);
   const [planSearchSelection, setPlanSearchSelection] = useState<string[]>([]);
   const [planSearchLoading, setPlanSearchLoading] = useState(false);
+  const [preheatedOrders, setPreheatedOrders] = useState<Order[] | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [sheetEditorOpen, setSheetEditorOpen] = useState(false);
   const [sheetHistoryOpen, setSheetHistoryOpen] = useState(false);
@@ -667,11 +668,7 @@ export function ProductionCockpit() {
       );
   }
 
-  async function loadPlanCampaign() {
-    const picked = planSearchResults.filter((order) =>
-      planSearchSelection.includes(order.id),
-    );
-    if (!picked.length) return;
+  async function finishLoadingPlanCampaign(picked: Order[]) {
     const reference = picked[0];
     setPlanSearchOpen(false);
     setToolInput(reference.tool_code);
@@ -683,6 +680,75 @@ export function ProductionCockpit() {
     );
     setMessage(
       `${picked.length} item(ns) de ${new Set(picked.map((order) => order.plan_code)).size} Plano(s) carregado(s) na campanha.`,
+    );
+  }
+
+  async function loadPlanCampaign() {
+    const picked = planSearchResults.filter((order) =>
+      planSearchSelection.includes(order.id),
+    );
+    if (!picked.length) return;
+    const hasHeatingRecord = picked.some((order) =>
+      planHeatingLocations.some(
+        (cycle) =>
+          cycle.tool_heating_cycle_orders?.some(
+            (link) => link.production_order_id === order.id,
+          ) ||
+          (cycle.machine_code === order.machine_code &&
+            normalizeCode(cycle.tool_code) === normalizeCode(order.tool_code)),
+      ),
+    );
+    if (!hasHeatingRecord) {
+      setPlanSearchOpen(false);
+      setPreheatedOrders(picked);
+      return;
+    }
+    await finishLoadingPlanCampaign(picked);
+  }
+
+  async function registerPreheatedTool(justification: string) {
+    if (!preheatedOrders?.length) return;
+    const response = await fetch("/api/tool-heating/preheated", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        orderIds: preheatedOrders.map((order) => order.id),
+        justification,
+      }),
+    });
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: string;
+      cycleId?: string;
+    };
+    if (!response.ok || !payload.cycleId) {
+      throw new Error(payload.error || "Não foi possível registrar a liberação.");
+    }
+    const reference = preheatedOrders[0];
+    setPlanHeatingLocations((current) => [
+      {
+        id: payload.cycleId!,
+        machine_code: reference.machine_code,
+        tool_code: reference.tool_code,
+        oven_code: null,
+        oven_position: null,
+        status: "released",
+        expected_ready_at: new Date().toISOString(),
+        tool_heating_cycle_orders: preheatedOrders.map((order) => ({
+          production_order_id: order.id,
+        })),
+      },
+      ...current,
+    ]);
+    requestOfflineSync();
+  }
+
+  async function continueAfterPreheatedConfirmation() {
+    const picked = preheatedOrders;
+    if (!picked?.length) return;
+    setPreheatedOrders(null);
+    await finishLoadingPlanCampaign(picked);
+    setMessage(
+      `Aquecimento da ferramenta ${picked[0].tool_code} confirmado e registrado. Campanha pronta para iniciar.`,
     );
   }
   function chooseSheet(id: string) {
@@ -1667,6 +1733,14 @@ export function ProductionCockpit() {
           onConfirm={() => void loadPlanCampaign()}
         />
       )}
+      {preheatedOrders && (
+        <PreheatedToolDialog
+          orders={preheatedOrders}
+          onClose={() => setPreheatedOrders(null)}
+          onConfirm={registerPreheatedTool}
+          onReady={() => void continueAfterPreheatedConfirmation()}
+        />
+      )}
       {chosen.length > 0 && completionOpen && (
         <ProductionCompletionDialog
           orders={chosen}
@@ -2465,6 +2539,152 @@ function HeatingLocationBadge({ cycle }: { cycle?: PlanHeatingLocation }) {
     return <span className="inline-flex w-fit items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-[9px] font-black uppercase text-emerald-700"><CheckCircle2 className="size-3" />Liberada</span>;
   }
   return <span className="inline-flex w-fit items-center gap-1 rounded-full bg-orange-50 px-2 py-1 text-[9px] font-bold text-orange-700" title={`Liberação mínima às ${displayClock(cycle.expected_ready_at)}`}><Flame className="size-3" />{cycle.oven_code || "Forno"} · posição {cycle.oven_position ?? "—"}</span>;
+}
+
+function PreheatedToolDialog({
+  orders,
+  onClose,
+  onConfirm,
+  onReady,
+}: {
+  orders: Order[];
+  onClose: () => void;
+  onConfirm: (justification: string) => Promise<void>;
+  onReady: () => void;
+}) {
+  const [justification, setJustification] = useState("");
+  const [stage, setStage] = useState<"confirm" | "saving" | "warming">("confirm");
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState("");
+  const onReadyRef = useRef(onReady);
+  const reference = orders[0];
+  const planCount = new Set(orders.map((order) => order.plan_code)).size;
+
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  }, [onReady]);
+
+  useEffect(() => {
+    if (stage !== "warming") return;
+    const startedAt = performance.now();
+    const timer = window.setInterval(() => {
+      const elapsed = performance.now() - startedAt;
+      setProgress(Math.min(100, (elapsed / 4000) * 100));
+      if (elapsed >= 4000) {
+        window.clearInterval(timer);
+        onReadyRef.current();
+      }
+    }, 50);
+    return () => window.clearInterval(timer);
+  }, [stage]);
+
+  async function confirm() {
+    if (justification.trim().length < 8) {
+      setError("Informe uma justificativa com pelo menos 8 caracteres.");
+      return;
+    }
+    setStage("saving");
+    setError("");
+    try {
+      await onConfirm(justification.trim());
+      setStage("warming");
+    } catch (cause) {
+      setStage("confirm");
+      setError(errorMessage(cause));
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-950/65 p-3 backdrop-blur-sm">
+      <div className="w-full max-w-lg overflow-hidden rounded-3xl border bg-white shadow-2xl">
+        {stage === "warming" ? (
+          <div className="relative overflow-hidden px-8 py-10 text-center">
+            <div className="absolute inset-x-0 top-0 h-36 bg-gradient-to-b from-orange-100 via-amber-50 to-transparent" />
+            <div className="relative mx-auto mb-5 grid size-32 place-items-center">
+              <span className="absolute size-32 animate-ping rounded-full border border-orange-300/50" />
+              <span className="absolute size-24 animate-pulse rounded-full bg-orange-100" />
+              <span className="relative grid size-20 place-items-center rounded-3xl bg-gradient-to-br from-amber-400 to-orange-600 text-white shadow-xl shadow-orange-200">
+                <Wrench className="size-9" />
+              </span>
+              <Flame className="absolute -right-1 top-4 size-8 animate-bounce fill-orange-500 text-orange-600" />
+              <Thermometer className="absolute -left-1 bottom-3 size-7 text-red-500" />
+            </div>
+            <p className="relative text-xs font-black uppercase tracking-[0.24em] text-orange-600">
+              Liberação térmica
+            </p>
+            <h2 className="relative mt-2 font-heading text-2xl font-black text-slate-950">
+              Aquecimento confirmado
+            </h2>
+            <p className="relative mt-2 text-sm text-slate-500">
+              Registrando {reference.tool_code} e preparando a ficha de produção.
+            </p>
+            <div className="relative mt-7 h-2 overflow-hidden rounded-full bg-slate-100">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-amber-400 via-orange-500 to-red-500 transition-[width] duration-100"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+            <div className="relative mt-2 flex justify-between text-[10px] font-bold text-slate-400">
+              <span>Confirmando</span>
+              <span>{Math.round(progress)}%</span>
+              <span>Produção</span>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="flex items-start justify-between border-b px-6 py-5">
+              <div className="flex gap-3">
+                <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-amber-100 text-orange-600">
+                  <AlertTriangle className="size-5" />
+                </span>
+                <div>
+                  <h2 className="font-heading text-xl font-black text-slate-950">
+                    A ferramenta está aquecida?
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    {reference.tool_code} não possui entrada ou liberação registrada no forno.
+                  </p>
+                </div>
+              </div>
+              <button aria-label="Fechar" onClick={onClose} className="grid size-8 place-items-center rounded-lg hover:bg-slate-100">
+                <X className="size-5" />
+              </button>
+            </div>
+            <div className="space-y-4 px-6 py-5">
+              <div className="grid grid-cols-3 gap-2 rounded-2xl bg-slate-50 p-3 text-center">
+                <div><p className="text-[9px] font-bold uppercase text-slate-400">Ferramenta</p><p className="mt-1 font-black text-orange-600">{reference.tool_code}</p></div>
+                <div><p className="text-[9px] font-bold uppercase text-slate-400">Prensa</p><p className="mt-1 font-black">P{reference.machine_code}</p></div>
+                <div><p className="text-[9px] font-bold uppercase text-slate-400">Programação</p><p className="mt-1 font-black">{orders.length} item(ns) · {planCount} Plano(s)</p></div>
+              </div>
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+                Confirme somente se a ferramenta já recebeu aquecimento fora do controle registrado. A justificativa, o usuário e o horário ficarão salvos para auditoria.
+              </div>
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-500">Justificativa obrigatória</span>
+                <textarea
+                  autoFocus
+                  value={justification}
+                  onChange={(event) => setJustification(event.target.value)}
+                  placeholder="Ex.: ferramenta aquecida no turno anterior e retirada para esta programação"
+                  className="min-h-24 w-full resize-none rounded-2xl border bg-white p-3 text-sm outline-none transition focus:border-orange-400 focus:ring-4 focus:ring-orange-100"
+                />
+              </label>
+              {error && <p className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>}
+            </div>
+            <div className="flex items-center justify-between gap-3 border-t bg-slate-50 px-6 py-4">
+              <Button variant="outline" onClick={onClose} disabled={stage === "saving"}>
+                Não, manter aguardando
+              </Button>
+              <Button onClick={() => void confirm()} disabled={stage === "saving"} className="bg-orange-500 font-bold hover:bg-orange-600">
+                {stage === "saving" ? <Loader2 className="size-4 animate-spin" /> : <Flame className="size-4" />}
+                Sim, está aquecida
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function CampaignSummary({

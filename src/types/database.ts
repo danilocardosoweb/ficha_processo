@@ -83,6 +83,7 @@ export interface SimplifiedRow {
   ativa: boolean;
   unidade: "kg" | "pieces" | "bars";
   quantidade?: number;
+  ultimaProdutividadeKgH?: number;
 }
 
 export type PcpImportType = "order_portfolio" | "planning_history";

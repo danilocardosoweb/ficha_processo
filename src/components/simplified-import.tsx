@@ -89,6 +89,13 @@ const aliases = {
     "quantidadepecas",
     "quantidadebarras",
   ],
+  ultimaProdutividadeKgH: [
+    "ultprod",
+    "ultimaprod",
+    "ultimaprodutividade",
+    "ultprodutividade",
+    "produtividadeanterior",
+  ],
 } as const;
 type ColumnKey = keyof typeof aliases;
 
@@ -318,6 +325,8 @@ function mapRows(rows: Cell[][], fileName: string) {
         ativa: parseActive(value(row, "ativa"), indexes.ativa >= 0),
         unidade,
         quantidade: quantidade > 0 ? quantidade : undefined,
+        ultimaProdutividadeKgH:
+          parseNumber(value(row, "ultimaProdutividadeKgH")) || undefined,
         sourceRow: headerIndex + index + 2,
       } satisfies SimplifiedRow;
     })
@@ -544,6 +553,7 @@ export function SimplifiedImport() {
             sequence: index + 1,
             status: "planned",
             requires_tool_heating: true,
+            last_productivity_kg_h: row.ultimaProdutividadeKgH || null,
             notes: row.observacao || null,
             source_data: {
               ...row,
