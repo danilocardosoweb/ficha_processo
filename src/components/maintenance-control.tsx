@@ -2,8 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
+  CalendarClock,
   CheckCircle2,
   Clock3,
+  Plus,
   Loader2,
   Search,
   ShieldAlert,
@@ -11,6 +14,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { createClient } from "@/lib/supabase/client";
 import { useCurrentUser } from "@/components/current-user-provider";
 
@@ -38,6 +42,7 @@ type Stoppage = {
   reported_by_name: string;
   closed_by_name: string | null;
 };
+type StoppageCatalog = { id: string; code: string; label: string; group_code: string | null; metadata: { internal_category?: string }; responsible_department: string | null; routes_to_maintenance: boolean };
 
 const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
 const categories: Record<string, string> = {
@@ -60,6 +65,12 @@ export function MaintenanceControl() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("open");
   const [message, setMessage] = useState("");
+  const [addOpen, setAddOpen] = useState(false);
+  const [machines, setMachines] = useState<string[]>([]);
+  const [catalog, setCatalog] = useState<StoppageCatalog[]>([]);
+  const [shifts, setShifts] = useState<{ id: string; code: string; name: string; is_active: boolean }[]>([]);
+  const [savingNew, setSavingNew] = useState(false);
+  const [newForm, setNewForm] = useState({ machine: "", typeCode: "E", reasonId: "", reasonCode: "", reason: "", department: "Manutenção", shift: "", startedAt: localDateTimeValue(), notes: "" });
 
   const load = useCallback(async () => {
     if (!organizationId) return;
@@ -85,6 +96,52 @@ export function MaintenanceControl() {
   useEffect(() => {
     queueMicrotask(() => void load());
   }, [load]);
+
+  useEffect(() => {
+    void (async () => {
+      if (!organizationId) return;
+      const client = createClient();
+      const [{ data }, { data: catalogRows }] = await Promise.all([
+        client.from("machines").select("code").eq("organization_id", organizationId).eq("is_active", true).order("code"),
+        client.from("operational_catalogs").select("id,code,label,group_code,metadata,responsible_department,routes_to_maintenance").eq("organization_id", organizationId).in("catalog_type", ["stoppage_type", "stoppage_reason"]).eq("is_active", true).order("sort_order"),
+      ]);
+      const codes = (data ?? []).map((item) => String(item.code));
+      setMachines(codes.length ? codes : ["18", "19"]);
+      setNewForm((current) => ({ ...current, machine: current.machine || codes[0] || "18" }));
+      setCatalog((catalogRows ?? []) as StoppageCatalog[]);
+      const settingsResponse = await fetch("/api/production-settings");
+      if (settingsResponse.ok) { const settings = await settingsResponse.json(); setShifts((settings.shifts ?? []).filter((item: { is_active: boolean }) => item.is_active)); }
+    })();
+  }, []);
+
+  const catalogTypes = catalog.filter((item) => ["E", "F", "O", "PL", "UTL", "NPR"].includes(item.code));
+  const selectedCatalogType = catalogTypes.find((item) => item.code === newForm.typeCode);
+  const catalogReasons = catalog.filter((item) => item.group_code === newForm.typeCode);
+
+  async function addStoppage(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!organizationId || !newForm.machine || (!newForm.reason.trim() && !newForm.reasonId)) return;
+    setSavingNew(true); setMessage("");
+    try {
+      const startedAt = new Date(newForm.startedAt).toISOString();
+      const selectedReason = catalogReasons.find((item) => item.id === newForm.reasonId);
+      const { error } = await createClient().from("machine_stoppages").insert({
+        organization_id: organizationId, production_order_id: null, import_batch_id: null,
+        machine_code: newForm.machine, plan_code: null, order_number: "", tool_code: "",
+        category: selectedCatalogType?.metadata?.internal_category || "other", reason_catalog_id: selectedReason?.id || null, stoppage_type_catalog_id: selectedCatalogType?.id || null,
+        reason_code: selectedReason?.code || newForm.reasonCode.trim() || null,
+        reason: [selectedReason?.label, newForm.reason.trim()].filter(Boolean).join(" · "), responsible_department: newForm.department || selectedReason?.responsible_department || null,
+        notes: newForm.notes.trim() || null, shift: newForm.shift.trim() || null,
+        started_at: startedAt, status: "open", maintenance_required: true, reported_by_name: operatorName,
+        occurrence_date: startedAt.slice(0, 10),
+      });
+      if (error) throw error;
+      setAddOpen(false); setNewForm((current) => ({ ...current, reasonId: "", reasonCode: "", reason: "", notes: "", startedAt: localDateTimeValue() }));
+      setMessage(`Parada aberta na Prensa ${newForm.machine}. A manutenção foi avisada e o tempo já está sendo contado.`);
+      await load();
+    } catch (cause) { setMessage(errorMessage(cause)); }
+    finally { setSavingNew(false); }
+  }
 
   const visible = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -189,6 +246,10 @@ export function MaintenanceControl() {
       </div>
 
       <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
+        <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
+          <div><h2 className="font-heading font-bold text-slate-900">Registro de paradas</h2><p className="text-xs text-slate-500">Aponte uma quebra de prensa mesmo sem uma ordem em produção.</p></div>
+          <Button onClick={() => setAddOpen(true)} className="shrink-0 bg-orange-500 font-bold hover:bg-orange-600"><Plus /> Adicionar parada</Button>
+        </div>
         <div className="flex flex-col gap-3 border-b p-4 lg:flex-row lg:items-center">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
@@ -258,15 +319,15 @@ export function MaintenanceControl() {
                     Programação
                   </p>
                   <p className="text-sm font-bold">
-                    Plano {row.plan_code || "—"}
+                    {row.production_order_id ? `Plano ${row.plan_code || "—"}` : "Parada avulsa"}
                   </p>
-                  <p className="text-xs text-slate-500">{row.order_number}</p>
+                  <p className="text-xs text-slate-500">{row.order_number || "Sem ordem vinculada"}</p>
                 </div>
                 <div>
                   <p className="text-[9px] font-bold uppercase text-slate-400">
                     Contexto
                   </p>
-                  <p className="text-sm font-bold">{row.tool_code}</p>
+                  <p className="text-sm font-bold">{row.tool_code || "Sem ferramenta"}</p>
                   <p className="text-xs text-slate-500">
                     {formatDateTime(row.started_at)} · {row.reported_by_name}
                   </p>
@@ -306,8 +367,32 @@ export function MaintenanceControl() {
           )}
         </div>
       </section>
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader><DialogTitle className="flex items-center gap-2"><AlertTriangle className="size-5 text-orange-500" />Adicionar parada de máquina</DialogTitle><DialogDescription>Use para quebras ou ocorrências fora de uma produção. A parada ficará aberta até ser encerrada.</DialogDescription></DialogHeader>
+          <form onSubmit={addStoppage} className="grid gap-4 sm:grid-cols-2">
+            <label className="text-sm font-semibold">Prensa<select required value={newForm.machine} onChange={(event) => setNewForm({ ...newForm, machine: event.target.value })} className="mt-1 h-10 w-full rounded-lg border bg-white px-3">{machines.map((code) => <option key={code} value={code}>Prensa {code === "18" ? "1.8" : code === "19" ? "1.9" : code}</option>)}</select></label>
+            <label className="text-sm font-semibold">Tipo de parada<select value={newForm.typeCode} onChange={(event) => setNewForm({ ...newForm, typeCode: event.target.value, reasonId: "" })} className="mt-1 h-10 w-full rounded-lg border bg-white px-3">{(catalogTypes.length ? catalogTypes : [{ id: "fallback-e", code: "E", label: "EQUIPAMENTO", group_code: null, metadata: { internal_category: "mechanical" }, responsible_department: "Manutenção", routes_to_maintenance: true }]).map((type) => <option key={type.id} value={type.code}>{type.label} · {type.code}</option>)}</select></label>
+            <label className="text-sm font-semibold">Motivo catalogado<select value={newForm.reasonId} onChange={(event) => setNewForm({ ...newForm, reasonId: event.target.value, reason: "" })} className="mt-1 h-10 w-full rounded-lg border bg-white px-3"><option value="">Outro motivo (digitar abaixo)</option>{catalogReasons.map((reason) => <option key={reason.id} value={reason.id}>{reason.code} · {reason.label}</option>)}</select></label>
+            <label className="text-sm font-semibold sm:col-span-2">Descrição complementar{newForm.reasonId ? <span className="ml-2 text-xs font-normal text-slate-500">opcional</span> : null}<Input required={!newForm.reasonId} value={newForm.reason} onChange={(event) => setNewForm({ ...newForm, reason: event.target.value })} className="mt-1" placeholder={newForm.reasonId ? "Detalhe adicional (opcional)" : "Ex.: Prensa desligada por falha hidráulica"} /></label>
+            <label className="text-sm font-semibold">Código manual (opcional)<Input value={newForm.reasonCode} onChange={(event) => setNewForm({ ...newForm, reasonCode: event.target.value })} className="mt-1" placeholder="Ex.: E-014" /></label>
+            <label className="text-sm font-semibold">Turno<select value={newForm.shift} onChange={(event) => setNewForm({ ...newForm, shift: event.target.value })} className="mt-1 h-10 w-full rounded-lg border bg-white px-3"><option value="">Sem turno informado</option>{shifts.map((shift) => <option key={shift.id} value={shift.code}>{shift.code} · {shift.name}</option>)}</select></label>
+            <label className="text-sm font-semibold">Início da parada<input type="datetime-local" required value={newForm.startedAt} onChange={(event) => setNewForm({ ...newForm, startedAt: event.target.value })} className="mt-1 h-10 w-full rounded-lg border px-3" /></label>
+            <label className="text-sm font-semibold">Responsável / área<Input value={newForm.department} onChange={(event) => setNewForm({ ...newForm, department: event.target.value })} className="mt-1" /></label>
+            <label className="text-sm font-semibold sm:col-span-2">Observação inicial<textarea value={newForm.notes} onChange={(event) => setNewForm({ ...newForm, notes: event.target.value })} className="mt-1 min-h-20 w-full rounded-lg border px-3 py-2 text-sm" placeholder="Sintomas, impacto ou orientação para a manutenção..." /></label>
+            <div className="flex items-start gap-2 rounded-xl bg-amber-50 p-3 text-xs text-amber-800 sm:col-span-2"><CalendarClock className="mt-0.5 size-4 shrink-0" />O tempo total será calculado automaticamente quando a parada for encerrada.</div>
+            <DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => setAddOpen(false)}>Cancelar</Button><Button type="submit" disabled={savingNew || !newForm.machine} className="bg-orange-500 hover:bg-orange-600">{savingNew ? <Loader2 className="animate-spin" /> : <Wrench />} Abrir parada</Button></DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
+}
+
+function localDateTimeValue() {
+  const date = new Date();
+  const offset = date.getTimezoneOffset();
+  return new Date(date.getTime() - offset * 60000).toISOString().slice(0, 16);
 }
 
 function Summary({
