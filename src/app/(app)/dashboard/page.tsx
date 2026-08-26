@@ -14,6 +14,7 @@ import { DashboardChart } from "@/components/dashboard-chart";
 import { PageHeading } from "@/components/page-heading";
 import { StatusBadge } from "@/components/status-badge";
 import { orders } from "@/data/mock";
+import { requireCurrentUser } from "@/lib/local-auth/server";
 
 const kpis = [
   {
@@ -46,21 +47,24 @@ const kpis = [
   },
 ];
 
-export default function DashboardPage() {
+export default async function DashboardPage() {
+  const user = await requireCurrentUser();
+  const firstName = user.display_name.trim().split(/\s+/)[0] || user.username;
+  const canImport = user.role === "admin" || user.role === "pcp";
   return (
     <>
       <PageHeading
         eyebrow="Centro de operacoes"
-        title="Bom dia, Danilo"
+        title={`Bom dia, ${firstName}`}
         description="Acompanhe a programacao e o ritmo das prensas neste turno."
-        action={
+        action={canImport ? (
           <Button
             render={<Link href="/importar" />}
             className="bg-orange-500 hover:bg-orange-600"
           >
             Importar programacao <ArrowRight className="size-4" />
           </Button>
-        }
+        ) : undefined}
       />
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {kpis.map((kpi) => (
