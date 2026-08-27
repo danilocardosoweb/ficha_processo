@@ -17,6 +17,11 @@ export interface LoadOrderInput {
   productivitySource: ProductivitySource;
   toolReadyAt: Date | null;
   toolHeatingState: "released" | "heating" | "waiting";
+  /** Physical extrusion holes. Tracked now; rule influence will be versioned later. */
+  holes?: number | null;
+  /** BO imported from the operational source. Tracked now; not yet a constraint. */
+  boCode?: string | null;
+  carcassCode?: string | null;
 }
 
 export interface WorkShiftInput {
