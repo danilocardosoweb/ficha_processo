@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, Boxes, ChartNoAxesCombined, ChevronLeft, ChevronRight, Flame, Gauge, Import, Menu, PackageSearch, Settings, ShieldCheck, TimerReset, UnlockKeyhole, Wrench } from "lucide-react";
+import { BarChart3, Boxes, ChartNoAxesCombined, ChevronLeft, ChevronRight, FileCog, Flame, Gauge, Import, Menu, PackageSearch, Settings, ShieldCheck, TimerReset, UnlockKeyhole, Wrench } from "lucide-react";
 import { BrandMark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -21,13 +21,14 @@ const navigationGroups = [
     { label: "Carga Máquina", href: "/carga-maquina", icon: TimerReset },
   ] },
   { label: "Acompanhamento", items: [
+    { label: "Engenharia", href: "/engenharia", icon: FileCog },
     { label: "Manutenção", href: "/manutencao", icon: Wrench },
     { label: "Qualidade", href: "/qualidade", icon: ShieldCheck },
     { label: "Indicadores", href: "/indicadores", icon: BarChart3 },
   ] },
 ];
 
-const settingsPaths = ["/configuracoes", "/prensas", "/engenharia", "/ferramentas"];
+const settingsPaths = ["/configuracoes", "/prensas", "/ferramentas"];
 
 function NavLink({ label, href, icon: Icon, active, compact, onNavigate }: {
   label: string; href: string; icon: typeof Gauge; active: boolean; compact: boolean; onNavigate?: () => void;
@@ -46,6 +47,7 @@ function NavContent({ compact = false, onNavigate, onToggle }: { compact?: boole
   const pathname = usePathname();
   const user = useCurrentUser();
   const isPlanningRole = user.role === "admin" || user.role === "pcp";
+  const canSeeEngineering = isPlanningRole || user.role === "engineering";
   const allowedMachines = user.machine_codes ?? [];
   const canSeeMachine = (href: string) => isPlanningRole || href !== "/forno" || allowedMachines.length > 0;
   return (
@@ -56,7 +58,7 @@ function NavContent({ compact = false, onNavigate, onToggle }: { compact?: boole
           <div key={group.label} className={cn(groupIndex > 0 && "mt-5")}>
             {!compact && <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-[.2em] text-slate-600">{group.label}</p>}
             <div className="space-y-1">
-              {group.items.filter((item) => (isPlanningRole || !["/importar", "/planejamento", "/carga-maquina"].includes(item.href)) && canSeeMachine(item.href)).map((item) => {
+              {group.items.filter((item) => (isPlanningRole || !["/importar", "/planejamento", "/carga-maquina"].includes(item.href)) && (item.href !== "/engenharia" || canSeeEngineering) && canSeeMachine(item.href)).map((item) => {
                 const active = pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(item.href));
                 return <NavLink key={item.href} {...item} active={active} compact={compact} onNavigate={onNavigate} />;
               })}

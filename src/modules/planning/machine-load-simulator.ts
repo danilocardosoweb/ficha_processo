@@ -53,6 +53,32 @@ export interface ScheduledLoadItem extends LoadOrderInput {
   billetBarsLoaded: number;
   billetBalanceBeforeKg: number;
   billetBalanceAfterKg: number;
+  pressReadyAt: Date;
+  toolHeatingStartAt: Date | null;
+  calculatedToolReadyAt: Date;
+  latestHeatingStartAt: Date;
+  ovenSlotNumber: number | null;
+  thermalWaitMinutes: number;
+}
+
+export type ThermalCoverageStatus = "protected" | "attention" | "risk";
+
+export interface ThermalCoverageSummary {
+  status: ThermalCoverageStatus;
+  heatingHorizonMinutes: number;
+  minimumMixKg: number;
+  protectedBufferKg: number;
+  protectedProductionMinutes: number;
+  shortRunCount: number;
+  maxConsecutiveShortRuns: number;
+  peakOvenSlotsUsed: number;
+  ovenSlots: number;
+  predictedIdleMinutes: number;
+  riskItemCount: number;
+  firstRiskToolCode: string | null;
+  firstRiskAt: Date | null;
+  nextToolToHeat: string | null;
+  nextHeatingDeadlineAt: Date | null;
 }
 
 export interface BilletLoadSummary {
@@ -72,6 +98,7 @@ export interface MachineSimulation {
   simulatedMinutes: number;
   waitingMinutes: number;
   endsAt: Date | null;
+  thermalCoverage: ThermalCoverageSummary;
 }
 
 export interface LoadSimulation {
@@ -139,6 +166,81 @@ export function addWorkingMinutes(at: Date, minutesToAdd: number, shifts: WorkSh
   throw new Error(`Não foi possível calcular os turnos da prensa ${machineCode}.`);
 }
 
+function workingMinutesBetween(from: Date, to: Date, shifts: WorkShiftInput[], machineCode: string) {
+  if (to <= from) return 0;
+  return workWindows(from, shifts, machineCode, 30).reduce((total, window) => {
+    const start = Math.max(from.getTime(), window.start.getTime());
+    const end = Math.min(to.getTime(), window.end.getTime());
+    return total + Math.max(end - start, 0) / minute;
+  }, 0);
+}
+
+function maximumConsecutiveShortRuns(items: ScheduledLoadItem[]) {
+  let maximum = 0;
+  let current = 0;
+  for (const item of items) {
+    current = item.remainingKg < 300 ? current + 1 : 0;
+    maximum = Math.max(maximum, current);
+  }
+  return maximum;
+}
+
+function peakHeatingOccupation(items: ScheduledLoadItem[]) {
+  const uniqueWindows = new Map<string, { start: Date; end: Date }>();
+  for (const item of items) {
+    if (!item.toolHeatingStartAt || item.toolHeatingState === "released") continue;
+    const key = `${item.toolCode.trim().toUpperCase()}-${item.toolHeatingStartAt.getTime()}-${item.calculatedToolReadyAt.getTime()}`;
+    uniqueWindows.set(key, { start: item.toolHeatingStartAt, end: item.calculatedToolReadyAt });
+  }
+  const events = [...uniqueWindows.values()].flatMap((window) => [
+    { time: window.start.getTime(), change: 1 },
+    { time: window.end.getTime(), change: -1 },
+  ]).sort((left, right) => left.time - right.time || left.change - right.change);
+  let occupied = 0;
+  let peak = 0;
+  for (const event of events) {
+    occupied += event.change;
+    peak = Math.max(peak, occupied);
+  }
+  return peak;
+}
+
+function thermalCoverage(items: ScheduledLoadItem[], settings: MachineLoadSettings): ThermalCoverageSummary {
+  const firstRiskIndex = items.findIndex((item) => item.thermalWaitMinutes > 0.5);
+  const protectedItems = firstRiskIndex < 0 ? items : items.slice(0, firstRiskIndex);
+  const theoreticalMinutes = items.reduce((sum, item) => sum + item.theoreticalMinutes, 0);
+  const totalKg = items.reduce((sum, item) => sum + item.remainingKg, 0);
+  const averageProductivity = theoreticalMinutes > 0 ? totalKg / (theoreticalMinutes / 60) : settings.defaultProductivityKgH;
+  const shortRunCount = items.filter((item) => item.remainingKg < 300).length;
+  const maxConsecutiveShortRuns = maximumConsecutiveShortRuns(items);
+  const peakOvenSlotsUsed = peakHeatingOccupation(items);
+  const riskItems = items.filter((item) => item.thermalWaitMinutes > 0.5);
+  const firstRisk = riskItems[0] ?? null;
+  const firstWaiting = items.find((item) => item.toolHeatingState === "waiting") ?? null;
+  const predictedIdleMinutes = riskItems.reduce((sum, item) => sum + item.thermalWaitMinutes, 0);
+  const attention = !riskItems.length && (
+    maxConsecutiveShortRuns >= 3
+    || peakOvenSlotsUsed >= Math.max(Math.ceil(settings.ovenSlots * 0.8), 1)
+  );
+  return {
+    status: riskItems.length ? "risk" : attention ? "attention" : "protected",
+    heatingHorizonMinutes: settings.toolHeatingMinutes,
+    minimumMixKg: averageProductivity * (settings.toolHeatingMinutes / 60),
+    protectedBufferKg: protectedItems.reduce((sum, item) => sum + item.remainingKg, 0),
+    protectedProductionMinutes: protectedItems.reduce((sum, item) => sum + item.theoreticalMinutes + item.preparationMinutes, 0),
+    shortRunCount,
+    maxConsecutiveShortRuns,
+    peakOvenSlotsUsed,
+    ovenSlots: settings.ovenSlots,
+    predictedIdleMinutes,
+    riskItemCount: riskItems.length,
+    firstRiskToolCode: firstRisk?.toolCode ?? null,
+    firstRiskAt: firstRisk?.pressReadyAt ?? null,
+    nextToolToHeat: firstWaiting?.toolCode ?? null,
+    nextHeatingDeadlineAt: firstWaiting?.latestHeatingStartAt ?? null,
+  };
+}
+
 function chooseAlloy(
   order: LoadOrderInput,
   balances: Map<string, number>,
@@ -202,20 +304,45 @@ export function simulateMachineLoad(
     let previousAlloy = "";
     const toolAvailability = new Map<string, Date>();
     const ovenSlots = Array.from({ length: Math.max(settings.ovenSlots, 1) }, () => new Date(startedAt));
+    const toolHeatingAllocation = new Map<string, { start: Date; ready: Date; slot: number }>();
     const items: ScheduledLoadItem[] = [];
+
+    // Ciclos já aquecendo ocupam fisicamente uma vaga e precisam ser considerados
+    // antes de simular novas entradas no forno da mesma prensa.
+    const activeHeatingTools = new Map<string, Date>();
+    for (const order of queue) {
+      if (order.toolHeatingState !== "heating" || !order.toolReadyAt) continue;
+      const key = order.toolCode.trim().toUpperCase();
+      const current = activeHeatingTools.get(key);
+      if (!current || order.toolReadyAt > current) activeHeatingTools.set(key, order.toolReadyAt);
+    }
+    [...activeHeatingTools.entries()].sort((left, right) => left[1].getTime() - right[1].getTime()).forEach(([toolKey, ready], index) => {
+      const slotIndex = index % ovenSlots.length;
+      const heatingStart = new Date(ready.getTime() - settings.toolHeatingMinutes * minute);
+      ovenSlots[slotIndex] = ready > ovenSlots[slotIndex] ? ready : ovenSlots[slotIndex];
+      toolAvailability.set(toolKey, ready);
+      toolHeatingAllocation.set(toolKey, { start: heatingStart, ready, slot: slotIndex + 1 });
+    });
 
     for (const order of queue) {
       const remainingKg = Math.max(order.targetKg - order.producedKg, 0);
       if (remainingKg <= 0 || order.productivityKgH <= 0) continue;
       const toolKey = order.toolCode.trim().toUpperCase();
       let readyAt = toolAvailability.get(toolKey) ?? order.toolReadyAt;
+      let allocation = toolHeatingAllocation.get(toolKey) ?? null;
       if (!readyAt) {
         const slotIndex = ovenSlots.reduce((best, value, index) => value < ovenSlots[best] ? index : best, 0);
-        readyAt = new Date(ovenSlots[slotIndex].getTime() + settings.toolHeatingMinutes * minute);
+        const heatingStartAt = new Date(Math.max(ovenSlots[slotIndex].getTime(), startedAt.getTime()));
+        readyAt = new Date(heatingStartAt.getTime() + settings.toolHeatingMinutes * minute);
         ovenSlots[slotIndex] = readyAt;
+        allocation = { start: heatingStartAt, ready: readyAt, slot: slotIndex + 1 };
+        toolHeatingAllocation.set(toolKey, allocation);
       }
       toolAvailability.set(toolKey, readyAt);
-      const resourceReady = nextWorkingInstant(new Date(Math.max(pressAvailable.getTime(), readyAt.getTime())), shifts, machineCode);
+      const pressReadyAt = new Date(pressAvailable);
+      const resourceReady = nextWorkingInstant(new Date(Math.max(pressReadyAt.getTime(), readyAt.getTime())), shifts, machineCode);
+      const thermalWaitMinutes = workingMinutesBetween(pressReadyAt, resourceReady, shifts, machineCode);
+      const latestHeatingStartAt = new Date(pressReadyAt.getTime() - settings.toolHeatingMinutes * minute);
       const selectedAlloy = chooseAlloy(order, balances, settings);
       const alloyChange = previousAlloy && previousAlloy !== selectedAlloy ? settings.alloyChangeMinutes : 0;
       const preparationMinutes = settings.setupMinutes + alloyChange;
@@ -236,13 +363,13 @@ export function simulateMachineLoad(
       total.loadedKg += loadedKg;
       total.endingBalanceKg = billetBalanceAfterKg;
       billetTotals.set(selectedAlloy, total);
-      items.push({ ...order, remainingKg, selectedAlloy, startAt: resourceReady, extrusionStartAt, endAt, theoreticalMinutes, waitingMinutes: Math.max((resourceReady.getTime() - pressAvailable.getTime()) / minute, 0), preparationMinutes, billetRequiredKg, billetBarsLoaded, billetBalanceBeforeKg, billetBalanceAfterKg });
+      items.push({ ...order, remainingKg, selectedAlloy, startAt: resourceReady, extrusionStartAt, endAt, theoreticalMinutes, waitingMinutes: Math.max((resourceReady.getTime() - pressAvailable.getTime()) / minute, 0), preparationMinutes, billetRequiredKg, billetBarsLoaded, billetBalanceBeforeKg, billetBalanceAfterKg, pressReadyAt, toolHeatingStartAt: allocation?.start ?? null, calculatedToolReadyAt: readyAt, latestHeatingStartAt, ovenSlotNumber: allocation?.slot ?? null, thermalWaitMinutes });
       pressAvailable = endAt;
       previousAlloy = selectedAlloy;
     }
     const theoreticalMinutes = items.reduce((sum, item) => sum + item.theoreticalMinutes, 0);
     const waitingMinutes = items.reduce((sum, item) => sum + item.waitingMinutes + item.preparationMinutes, 0);
-    machines.push({ machineCode, items, startsAt: items[0]?.startAt ?? null, theoreticalMinutes, simulatedMinutes: items.length ? (items.at(-1)!.endAt.getTime() - startedAt.getTime()) / minute : 0, waitingMinutes, endsAt: items.at(-1)?.endAt ?? null });
+    machines.push({ machineCode, items, startsAt: items[0]?.startAt ?? null, theoreticalMinutes, simulatedMinutes: items.length ? (items.at(-1)!.endAt.getTime() - startedAt.getTime()) / minute : 0, waitingMinutes, endsAt: items.at(-1)?.endAt ?? null, thermalCoverage: thermalCoverage(items, settings) });
   }
 
   return {

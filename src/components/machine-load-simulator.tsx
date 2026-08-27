@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Boxes, CalendarClock, Clock3, Flame, Gauge, GripVertical, Loader2, PackageOpen, RefreshCw, Route, Settings2, TriangleAlert } from "lucide-react";
+import { Boxes, CalendarClock, Clock3, Flame, Gauge, GripVertical, Loader2, PackageOpen, RefreshCw, Route, Settings2, ShieldCheck, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { simulateMachineLoad, type LoadOrderInput, type MachineLoadSettings, type ProductivitySource, type WorkShiftInput } from "@/modules/planning/machine-load-simulator";
@@ -168,14 +168,44 @@ export function MachineLoadSimulator() {
       <Metric icon={PackageOpen} label="Barras a preparar" value={`${simulation.totalBars}`} tone="violet" />
       <Metric icon={Route} label="Itens na sequência" value={`${simulation.machines.reduce((sum, item) => sum + item.items.length, 0)}`} tone="green" />
     </section>
+    <ThermalCoveragePanel machines={simulation.machines} />
     <AlloyWarnings machines={simulation.machines} />
 
     <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
       <div className="flex items-center justify-between border-b px-4 py-3"><div><h2 className="font-heading font-bold text-slate-900">Simulação operacional</h2><p className="text-xs text-slate-500">Prensa + ferramenta/forno + tarugo/liga.</p></div><div className="flex rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setTab("timeline")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "timeline" ? "bg-white shadow-sm" : "text-slate-500"}`}><Clock3 className="mr-1 inline size-3.5" />Linha do tempo</button><button type="button" onClick={() => setTab("billets")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "billets" ? "bg-white shadow-sm" : "text-slate-500"}`}><PackageOpen className="mr-1 inline size-3.5" />Carga de tarugo</button></div></div>
       {tab === "timeline" ? <Timeline machines={simulation.machines} manual={mode === "manual"} onMove={moveManualOrder} /> : <BilletTable billets={simulation.billets} settings={settings} />}
     </section>
-    <div className="flex items-start gap-2 rounded-xl bg-blue-50 px-4 py-3 text-xs text-blue-800"><Settings2 className="mt-0.5 size-4 shrink-0" /><p><strong>Premissas da V1:</strong> barra de 415 kg, eficiência de 85%, 4 h de aquecimento e 21 vagas por prensa. A disponibilidade física de estoque ainda é apresentada como carga necessária; o modelo já separa liga principal e alternativas cadastradas.</p></div>
+    <div className="flex items-start gap-2 rounded-xl bg-blue-50 px-4 py-3 text-xs text-blue-800"><Settings2 className="mt-0.5 size-4 shrink-0" /><p><strong>Premissas da V1:</strong> barra de 415 kg, eficiência de 85% e 21 vagas por prensa. As 4 h são a regra operacional cadastrada e a cobertura térmica respeita os turnos. Estoque físico ainda é apresentado como carga necessária.</p></div>
   </div>;
+}
+
+function ThermalCoveragePanel({ machines }: { machines: ReturnType<typeof simulateMachineLoad>["machines"] }) {
+  const statusConfig = {
+    protected: { label: "Cobertura protegida", detail: "A sequência mantém ferramentas prontas sem espera térmica prevista.", shell: "border-emerald-200 bg-emerald-50", badge: "bg-emerald-600 text-white", icon: "text-emerald-600" },
+    attention: { label: "Mix curto exige atenção", detail: "Não há parada prevista, mas o mix curto ou a ocupação dos fornos reduz a margem.", shell: "border-amber-200 bg-amber-50", badge: "bg-amber-500 text-white", icon: "text-amber-600" },
+    risk: { label: "Risco de falta de ferramenta", detail: "A prensa alcança a próxima ferramenta antes do fim do aquecimento.", shell: "border-red-200 bg-red-50", badge: "bg-red-600 text-white", icon: "text-red-600" },
+  } as const;
+  if (!machines.length) return null;
+  return <section className="grid gap-3 xl:grid-cols-2">
+    {machines.map((machine) => {
+      const coverage = machine.thermalCoverage;
+      const visual = statusConfig[coverage.status];
+      return <article key={machine.machineCode} className={`rounded-2xl border px-4 py-3 shadow-sm ${visual.shell}`}>
+        <div className="flex flex-wrap items-center gap-2">
+          <ShieldCheck className={`size-5 ${visual.icon}`} />
+          <div className="min-w-0"><h3 className="text-sm font-black text-slate-900">Cobertura térmica · {machineLabel(machine.machineCode)}</h3><p className="text-[11px] text-slate-600">{visual.detail}</p></div>
+          <span className={`ml-auto rounded-full px-2.5 py-1 text-[9px] font-black uppercase tracking-wide ${visual.badge}`}>{visual.label}</span>
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Compact label={`Mix mínimo (${formatDuration(coverage.heatingHorizonMinutes)})`} value={`${formatNumber(coverage.minimumMixKg, 0)} kg`} />
+          <Compact label="Carga protegida" value={`${formatNumber(coverage.protectedBufferKg, 0)} kg`} />
+          <Compact label="Itens abaixo de 300 kg" value={`${coverage.shortRunCount} · máx. ${coverage.maxConsecutiveShortRuns} seguidos`} />
+          <Compact label="Pico de vagas" value={`${coverage.peakOvenSlotsUsed}/${coverage.ovenSlots}`} />
+        </div>
+        {coverage.status === "risk" ? <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border border-red-200 bg-white/70 px-3 py-2 text-[11px] text-red-800"><TriangleAlert className="size-4 shrink-0" /><strong>{formatDuration(coverage.predictedIdleMinutes)} de espera térmica</strong><span>Primeiro risco: {coverage.firstRiskToolCode} · {formatDateTime(coverage.firstRiskAt)}</span></div> : coverage.nextToolToHeat ? <p className="mt-2 text-[11px] text-slate-600"><strong>Próxima preparação:</strong> {coverage.nextToolToHeat} deve entrar no forno até {formatDateTime(coverage.nextHeatingDeadlineAt)}.</p> : null}
+      </article>;
+    })}
+  </section>;
 }
 
 function Metric({ icon: Icon, label, value, tone = "slate" }: { icon: typeof Gauge; label: string; value: string; tone?: "slate" | "orange" | "blue" | "violet" | "green" }) {
@@ -248,7 +278,7 @@ function Timeline({ machines, manual, onMove }: {
             <td className="px-3 py-2.5 font-mono font-bold text-slate-700">{item.orderNumber}</td>
             <td className="px-3 py-2.5 font-bold tabular-nums">{formatNumber(item.targetKg)} kg</td>
             <td className="px-3 py-2.5 font-bold tabular-nums text-blue-700">{formatNumber(item.remainingKg)} kg</td>
-            <td className="px-3 py-2.5"><span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[9px] font-bold ${item.toolHeatingState === "released" ? "bg-emerald-50 text-emerald-700" : item.toolHeatingState === "heating" ? "bg-orange-50 text-orange-700" : "bg-amber-50 text-amber-700"}`}><Flame className="size-3" />{item.toolHeatingState === "released" ? "Liberada" : item.toolHeatingState === "heating" ? "Aquecendo" : "Simulada 4h"}</span></td>
+            <td className="px-3 py-2.5"><span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[9px] font-bold ${item.thermalWaitMinutes > 0.5 ? "bg-red-100 text-red-700" : item.toolHeatingState === "released" ? "bg-emerald-50 text-emerald-700" : item.toolHeatingState === "heating" ? "bg-orange-50 text-orange-700" : "bg-amber-50 text-amber-700"}`}><Flame className="size-3" />{item.thermalWaitMinutes > 0.5 ? `Espera ${formatDuration(item.thermalWaitMinutes)}` : item.toolHeatingState === "released" ? "Liberada" : item.toolHeatingState === "heating" ? "Aquecendo" : "Simulada 4h"}</span>{item.ovenSlotNumber && item.toolHeatingState !== "released" && <span className="mt-1 block text-[9px] text-slate-400">Vaga {item.ovenSlotNumber} · entrar até {formatDateTime(item.latestHeatingStartAt)}</span>}</td>
             <td className="px-3 py-2.5 tabular-nums">{formatDateTime(item.extrusionStartAt)}</td>
             <td className="px-3 py-2.5 font-bold tabular-nums">{formatDuration(item.theoreticalMinutes)}</td>
             <td className="px-3 py-2.5 tabular-nums">{formatDateTime(item.endAt)}</td>

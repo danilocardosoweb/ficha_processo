@@ -22,6 +22,21 @@ export function AppShell({ children, user }: { children: ReactNode; user: LocalU
   }, []);
 
   useEffect(() => {
+    const heartbeat = () => {
+      if (document.visibilityState === "visible") {
+        void fetch("/api/session/heartbeat", { method: "POST", cache: "no-store" });
+      }
+    };
+    heartbeat();
+    const interval = window.setInterval(heartbeat, 45_000);
+    document.addEventListener("visibilitychange", heartbeat);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", heartbeat);
+    };
+  }, []);
+
+  useEffect(() => {
     const media = window.matchMedia("(max-width: 1439px)");
     const update = () => setCompactViewport(media.matches);
     update();

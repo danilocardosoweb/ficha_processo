@@ -38,7 +38,10 @@ export async function listLocalUsers(): Promise<ManagedUser[]> {
   const token = await getSessionToken();
   if (!token) return [];
   const supabase = await createClient();
-  const { data, error } = await supabase.rpc("local_list_users", { p_token: token });
-  if (error) throw error;
-  return (data ?? []) as ManagedUser[];
+  const present = await supabase.rpc("local_list_users_with_presence", { p_token: token });
+  if (!present.error) return (present.data ?? []) as ManagedUser[];
+
+  const fallback = await supabase.rpc("local_list_users", { p_token: token });
+  if (fallback.error) throw fallback.error;
+  return (fallback.data ?? []) as ManagedUser[];
 }

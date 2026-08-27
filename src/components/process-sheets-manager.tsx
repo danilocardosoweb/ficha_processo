@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ChevronLeft,
@@ -20,6 +20,13 @@ import { Button } from "@/components/ui/button";
 import { CoolingModeSelect } from "@/components/cooling-mode-select";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Sheet,
   SheetContent,
@@ -102,6 +109,10 @@ type ProcessSheet = {
   parameters: Parameters;
   is_active: boolean;
   updated_at: string;
+  achieved_productivity_kg_h?: number | null;
+  achieved_productivity_recorded_at?: string | null;
+  copied_from_process_sheet_id?: string | null;
+  copied_from_sequence?: number | null;
 };
 
 const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
@@ -122,8 +133,15 @@ const pullerSpeedMmMin = (p: Parameters) =>
 const formatMm = (value?: number) =>
   value == null ? "—" : `${numberFormatter.format(value)} mm`;
 const sanitizeToken = (value: string) => normalizeCode(value);
-
-export function ProcessSheetsManager() {
+export function ProcessSheetsManager({
+  initialToolCode = "",
+  returnToProductionInitially = false,
+}: {
+  initialToolCode?: string;
+  returnToProductionInitially?: boolean;
+}) {
+  const router = useRouter();
+  const normalizedInitialTool = normalizeCode(initialToolCode);
   const [sheets, setSheets] = useState<ProcessSheet[]>([]);
   const [machines, setMachines] = useState<Machine[]>([]);
   const [catalog, setCatalog] = useState<CatalogOption[]>([]);
@@ -134,14 +152,41 @@ export function ProcessSheetsManager() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
+  const [searchInput, setSearchInput] = useState(normalizedInitialTool);
+  const [search, setSearch] = useState(normalizedInitialTool);
   const [cutFilter, setCutFilter] = useState("");
   const [cutOptions, setCutOptions] = useState<number[]>([]);
   const [loadingCuts, setLoadingCuts] = useState(false);
   const [machineFilter, setMachineFilter] = useState("");
   const [page, setPage] = useState(0);
   const [total, setTotal] = useState(0);
+  const [creationGuideOpen, setCreationGuideOpen] = useState(
+    Boolean(normalizedInitialTool),
+  );
+  const [requestedToolCode, setRequestedToolCode] = useState(
+    normalizedInitialTool,
+  );
+  const [returnToProduction, setReturnToProduction] = useState(
+    returnToProductionInitially,
+  );
+  const [templateSearch, setTemplateSearch] = useState("");
+  const [templateOptions, setTemplateOptions] = useState<ProcessSheet[]>([]);
+  const [loadingTemplates, setLoadingTemplates] = useState(
+    Boolean(normalizedInitialTool),
+  );
+  const [targetSequence, setTargetSequence] = useState<number | null>(null);
+
+  const visibleTemplates = useMemo(() => {
+    const token = normalizeCode(templateSearch);
+    return templateOptions
+      .filter((sheet) => {
+        if (!token) return true;
+        return normalizeCode(
+          `${sheet.product_code ?? ""} ${sheet.tool_code} ${sheet.machine_code ?? ""} ${sheet.alloy_code} ${sheet.temper ?? ""}`,
+        ).includes(token);
+      })
+      .slice(0, 20);
+  }, [templateOptions, templateSearch]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -211,6 +256,45 @@ export function ProcessSheetsManager() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!requestedToolCode) return;
+
+    let cancelled = false;
+
+    async function loadTemplates() {
+      try {
+        if (!organizationId) throw new Error("Organização não configurada.");
+        const { data, error: templateError } = await withSupabaseTimeout(
+          createClient()
+            .from("process_sheets")
+            .select(
+              "id,machine_code,tool_code,product_code,alloy_code,temper,revision,tool_sequence,parameters,is_active,updated_at,achieved_productivity_kg_h,achieved_productivity_recorded_at,copied_from_process_sheet_id,copied_from_sequence",
+            )
+            .eq("organization_id", organizationId)
+            .eq("is_active", true)
+            .order("updated_at", { ascending: false })
+            .limit(250),
+          30000,
+        );
+        if (templateError) throw templateError;
+        if (!cancelled) setTemplateOptions((data ?? []) as ProcessSheet[]);
+      } catch {
+        const cached = await getOfflineSnapshot<ProcessSheet>("process_sheets");
+        if (!cancelled)
+          setTemplateOptions(
+            (cached?.rows ?? []).filter((sheet) => sheet.is_active),
+          );
+      } finally {
+        if (!cancelled) setLoadingTemplates(false);
+      }
+    }
+
+    void loadTemplates();
+    return () => {
+      cancelled = true;
+    };
+  }, [requestedToolCode]);
 
   useEffect(() => {
     if (!organizationId || !search) return;
@@ -331,7 +415,7 @@ export function ProcessSheetsManager() {
       let query = supabase
         .from("process_sheets")
         .select(
-          "id,machine_code,tool_code,product_code,alloy_code,temper,revision,tool_sequence,parameters,is_active,updated_at",
+          "id,machine_code,tool_code,product_code,alloy_code,temper,revision,tool_sequence,parameters,is_active,updated_at,achieved_productivity_kg_h,achieved_productivity_recorded_at,copied_from_process_sheet_id,copied_from_sequence",
           { count: "exact" },
         )
         .eq("organization_id", organizationId)
@@ -393,6 +477,9 @@ export function ProcessSheetsManager() {
   function openNewSheet() {
     setDraft(null);
     setNewSequence(false);
+    setRequestedToolCode("");
+    setTargetSequence(null);
+    setReturnToProduction(false);
     setError("");
     setMessage("");
     setFormOpen(true);
@@ -400,8 +487,29 @@ export function ProcessSheetsManager() {
   function openSheet(sheet: ProcessSheet, sequenceMode: boolean) {
     setDraft(sheet);
     setNewSequence(sequenceMode);
+    setRequestedToolCode("");
+    setTargetSequence(null);
+    setReturnToProduction(false);
     setError("");
     setMessage("");
+    setFormOpen(true);
+  }
+  function openBlankForRequested() {
+    setDraft(null);
+    setNewSequence(false);
+    setTargetSequence(1);
+    setError("");
+    setMessage("");
+    setCreationGuideOpen(false);
+    setFormOpen(true);
+  }
+  function copyTemplateForRequested(sheet: ProcessSheet) {
+    setDraft(sheet);
+    setNewSequence(true);
+    setTargetSequence(1);
+    setError("");
+    setMessage("");
+    setCreationGuideOpen(false);
     setFormOpen(true);
   }
   function clearFilters() {
@@ -517,7 +625,9 @@ export function ProcessSheetsManager() {
     const payload = {
       organization_id: organizationId,
       machine_code: String(form.get("machine_code") ?? "") || null,
-      tool_code: draft?.tool_code || actualToolCode,
+      tool_code: requestedToolCode
+        ? actualToolCode
+        : draft?.tool_code || actualToolCode,
       product_code: actualToolCode,
       alloy_code: String(form.get("alloy_code")).trim().toUpperCase(),
       temper:
@@ -533,7 +643,14 @@ export function ProcessSheetsManager() {
     const query =
       draft && !newSequence
         ? supabase.from("process_sheets").update(payload).eq("id", draft.id)
-        : supabase.from("process_sheets").insert(payload);
+        : supabase.from("process_sheets").insert({
+            ...payload,
+            copied_from_process_sheet_id: draft?.id ?? null,
+            copied_from_sequence:
+              draft == null ? null : draft.tool_sequence ?? draft.revision,
+            achieved_productivity_kg_h: null,
+            achieved_productivity_recorded_at: null,
+          });
     try {
       const { error: saveError } = await withSupabaseTimeout(query);
       if (saveError)
@@ -543,6 +660,8 @@ export function ProcessSheetsManager() {
             : saveError.message,
         );
       else {
+        const shouldReturn = returnToProduction && Boolean(requestedToolCode);
+        const savedToolCode = actualToolCode;
         setMessage(
           draft && !newSequence
             ? "Ficha atualizada com sucesso."
@@ -551,8 +670,14 @@ export function ProcessSheetsManager() {
         setFormOpen(false);
         setDraft(null);
         setNewSequence(false);
+        setRequestedToolCode("");
+        setTargetSequence(null);
         formElement.reset();
         requestOfflineSync();
+        if (shouldReturn) {
+          router.push(`/producao?tool=${encodeURIComponent(savedToolCode)}`);
+          return;
+        }
         await load();
       }
     } catch {
@@ -565,9 +690,11 @@ export function ProcessSheetsManager() {
   }
 
   const parameters = draft?.parameters ?? {};
-  const sequence = newSequence
-    ? (draft?.tool_sequence ?? draft?.revision ?? 0) + 1
-    : (draft?.tool_sequence ?? draft?.revision ?? 1);
+  const sequence =
+    targetSequence ??
+    (newSequence
+      ? (draft?.tool_sequence ?? draft?.revision ?? 0) + 1
+      : (draft?.tool_sequence ?? draft?.revision ?? 1));
   const hasFilters = Boolean(searchInput || cutFilter || machineFilter);
   const firstResult = total === 0 ? 0 : page * pageSize + 1;
   const lastResult = Math.min((page + 1) * pageSize, total);
@@ -754,6 +881,124 @@ export function ProcessSheetsManager() {
         </div>
       </section>
 
+      <Dialog
+        open={creationGuideOpen}
+        onOpenChange={(open) => {
+          if (!loadingTemplates) setCreationGuideOpen(open);
+        }}
+      >
+        <DialogContent className="max-h-[90dvh] max-w-3xl overflow-hidden p-0">
+          <DialogHeader className="border-b px-6 py-5 text-left">
+            <DialogTitle>Criar ficha de processo</DialogTitle>
+            <DialogDescription>
+              A ferramenta <strong>{requestedToolCode}</strong> ainda não possui
+              uma receita ativa. Comece em branco ou aproveite um setup já
+              validado como ponto de partida.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid min-h-0 gap-4 overflow-y-auto p-5 md:grid-cols-[0.8fr_1.2fr] md:p-6">
+            <div className="flex flex-col rounded-xl border border-orange-200 bg-orange-50/50 p-4">
+              <span className="mb-3 grid size-10 place-items-center rounded-lg bg-orange-100 text-orange-600">
+                <FilePlus2 className="size-5" />
+              </span>
+              <h3 className="font-semibold text-slate-950">Começar em branco</h3>
+              <p className="mt-1 flex-1 text-sm leading-5 text-slate-600">
+                Crie a sequência 1 de {requestedToolCode} e informe todos os
+                parâmetros técnicos manualmente.
+              </p>
+              <Button
+                type="button"
+                className="mt-5 bg-orange-500 font-semibold hover:bg-orange-600"
+                onClick={openBlankForRequested}
+              >
+                <FilePlus2 className="size-4" />
+                Criar ficha em branco
+              </Button>
+            </div>
+
+            <div className="min-w-0 rounded-xl border bg-white p-4">
+              <div className="flex items-start gap-3">
+                <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-700">
+                  <CopyPlus className="size-4" />
+                </span>
+                <div>
+                  <h3 className="font-semibold text-slate-950">
+                    Copiar uma ficha existente
+                  </h3>
+                  <p className="text-xs leading-5 text-slate-500">
+                    A cópia será editável e manterá a origem registrada para
+                    auditoria.
+                  </p>
+                </div>
+              </div>
+              <div className="relative mt-4">
+                <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+                <Input
+                  value={templateSearch}
+                  onChange={(event) => setTemplateSearch(event.target.value)}
+                  className="pl-9"
+                  placeholder="Buscar ferramenta, liga ou prensa"
+                  aria-label="Buscar ficha para copiar"
+                />
+              </div>
+              <div className="mt-3 max-h-[42dvh] space-y-2 overflow-y-auto pr-1">
+                {loadingTemplates ? (
+                  <div className="grid min-h-32 place-items-center text-sm text-slate-500">
+                    <span className="flex items-center gap-2">
+                      <Loader2 className="size-4 animate-spin text-orange-500" />
+                      Consultando fichas...
+                    </span>
+                  </div>
+                ) : visibleTemplates.length === 0 ? (
+                  <div className="rounded-lg border border-dashed p-5 text-center text-sm text-slate-500">
+                    Nenhuma ficha encontrada para este filtro.
+                  </div>
+                ) : (
+                  visibleTemplates.map((sheet) => {
+                    const productivity =
+                      sheet.achieved_productivity_kg_h ??
+                      sheet.parameters.extrusion?.target_productivity_kg_h;
+                    return (
+                      <div
+                        key={sheet.id}
+                        className="flex items-center gap-3 rounded-lg border p-3 transition hover:border-orange-300 hover:bg-orange-50/30"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <strong className="font-mono text-sm text-slate-950">
+                              {sheet.product_code || sheet.tool_code}
+                            </strong>
+                            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-600">
+                              Seq. {sheet.tool_sequence ?? sheet.revision}
+                            </span>
+                          </div>
+                          <p className="mt-1 truncate text-xs text-slate-500">
+                            {sheet.machine_code || "Prensa padrão"} · {sheet.alloy_code}{" "}
+                            {sheet.temper || ""} · {formatMm(cutLengthMm(sheet.parameters))}
+                            {productivity
+                              ? ` · ${numberFormatter.format(productivity)} kg/h`
+                              : ""}
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="shrink-0"
+                          onClick={() => copyTemplateForRequested(sheet)}
+                        >
+                          Usar como modelo
+                        </Button>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Sheet
         open={formOpen}
         onOpenChange={(open) => {
@@ -766,14 +1011,14 @@ export function ProcessSheetsManager() {
           showCloseButton={false}
         >
           <form
-            key={`${draft?.id ?? "new"}-${newSequence}`}
+            key={`${draft?.id ?? "new"}-${newSequence}-${requestedToolCode}-${targetSequence ?? ""}`}
             onSubmit={save}
             className="flex min-h-0 flex-1 flex-col"
           >
             <SheetHeader className="border-b px-5 py-4 pr-16">
               <SheetTitle className="text-lg font-bold">
                 {newSequence
-                  ? "Nova sequência da ferramenta"
+                  ? "Nova sequência a partir do setup"
                   : draft
                     ? "Editar ficha"
                     : "Nova ficha de processo"}
@@ -799,7 +1044,11 @@ export function ProcessSheetsManager() {
                 <Field
                   label="Ferramenta"
                   name="product_code"
-                  value={draft?.product_code ?? draft?.tool_code}
+                  value={
+                    requestedToolCode ||
+                    draft?.product_code ||
+                    draft?.tool_code
+                  }
                   required
                 />
                 <CatalogSelect
@@ -1135,6 +1384,18 @@ function SheetTable({
   onDuplicateSequence: (sheet: ProcessSheet) => void;
 }) {
   const router = useRouter();
+  const bestProductivityByTool = new Map<string, number>();
+  for (const sheet of sheets) {
+    if (sheet.achieved_productivity_kg_h == null) continue;
+    const key = normalizeCode(sheet.product_code || sheet.tool_code);
+    bestProductivityByTool.set(
+      key,
+      Math.max(
+        bestProductivityByTool.get(key) ?? 0,
+        sheet.achieved_productivity_kg_h,
+      ),
+    );
+  }
   return (
     <table className="w-full min-w-[900px] border-collapse text-left text-sm">
       <thead className="sticky top-0 z-10 bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500 shadow-[0_1px_0_0_#e2e8f0]">
@@ -1145,6 +1406,7 @@ function SheetTable({
           <Th center>Sequência</Th>
           <Th right>Peso linear</Th>
           <Th right>Corte</Th>
+          <Th right>Produtividade alcançada</Th>
           <Th>Status</Th>
           <Th right>Ações</Th>
         </tr>
@@ -1173,6 +1435,32 @@ function SheetTable({
             </td>
             <td className="px-4 py-3.5 text-right font-semibold tabular-nums">
               {formatMm(cutLengthMm(sheet.parameters))}
+            </td>
+            <td className="px-4 py-3.5 text-right tabular-nums">
+              {sheet.achieved_productivity_kg_h == null ? (
+                <span className="text-slate-400">Sem histórico</span>
+              ) : (
+                <div>
+                  <div className="flex items-center justify-end gap-1.5">
+                    <strong className="text-emerald-700">
+                      {numberFormatter.format(sheet.achieved_productivity_kg_h)} kg/h
+                    </strong>
+                    {sheet.achieved_productivity_kg_h ===
+                      bestProductivityByTool.get(
+                        normalizeCode(sheet.product_code || sheet.tool_code),
+                      ) && (
+                      <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-emerald-700">
+                        Melhor
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+              {sheet.copied_from_sequence != null && (
+                <span className="block text-[10px] text-slate-400">
+                  Setup copiado da seq. {sheet.copied_from_sequence}
+                </span>
+              )}
             </td>
             <td className="px-4 py-3.5">
               <span
@@ -1221,7 +1509,7 @@ function SheetTable({
                   onClick={() => onDuplicateSequence(sheet)}
                 >
                   <CopyPlus className="size-3.5" />
-                  Nova sequência
+                  Copiar setup
                 </Button>
               </div>
             </td>

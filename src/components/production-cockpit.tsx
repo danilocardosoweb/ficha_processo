@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
   CalendarDays,
@@ -11,6 +12,7 @@ import {
   ChevronDown,
   Factory,
   FileClock,
+  FilePlus2,
   Flame,
   Gauge,
   History,
@@ -101,6 +103,8 @@ type ProcessSheet = {
   updated_at?: string;
   last_changed_by_name?: string | null;
   last_change_reason?: string | null;
+  achieved_productivity_kg_h?: number | null;
+  achieved_productivity_recorded_at?: string | null;
 };
 type SheetHistory = {
   id: number;
@@ -151,6 +155,8 @@ type Order = {
   reopened_by_name: string | null;
   reprogram_count: number;
   due_date: string | null;
+  process_sheet_id: string | null;
+  achieved_productivity_kg_h: number | null;
 };
 type PlanHeatingLocation = {
   id: string;
@@ -181,7 +187,7 @@ const discardMm = (sheet?: ProcessSheet) =>
   numeric(sheet?.parameters.extrusion?.discard_mm) ||
   numeric(sheet?.parameters.extrusion?.discard_m) * 1000;
 const orderFields =
-  "id,import_batch_id,order_number,plan_code,machine_code,tool_code,product_code,customer_name,alloy_code,temper,target_kg,target_quantity,demand_unit,is_active,produced_kg,produced_quantity,status,sequence,actual_start,actual_end,started_by_name,completed_by_name,reopened_at,reopened_by_name,reprogram_count,due_date";
+  "id,import_batch_id,order_number,plan_code,machine_code,tool_code,product_code,customer_name,alloy_code,temper,target_kg,target_quantity,demand_unit,is_active,produced_kg,produced_quantity,status,sequence,actual_start,actual_end,started_by_name,completed_by_name,reopened_at,reopened_by_name,reprogram_count,due_date,process_sheet_id,achieved_productivity_kg_h";
 
 const displayDueDate = (value: string | null) => {
   if (!value) return "—";
@@ -312,6 +318,7 @@ function calculate(
 }
 
 export function ProductionCockpit() {
+  const router = useRouter();
   const { display_name: operatorName } = useCurrentUser();
   const [toolInput, setToolInput] = useState("");
   const [sheets, setSheets] = useState<ProcessSheet[]>([]);
@@ -338,6 +345,7 @@ export function ProductionCockpit() {
   const [loading, setLoading] = useState(false);
   const [savingStatus, setSavingStatus] = useState(false);
   const [message, setMessage] = useState("");
+  const [missingSheetTool, setMissingSheetTool] = useState("");
   const selected = useMemo(
     () => sheets.find((sheet) => sheet.id === selectedId),
     [sheets, selectedId],
@@ -401,6 +409,7 @@ export function ProductionCockpit() {
       }
       setLoading(true);
       setMessage("");
+      setMissingSheetTool("");
       try {
         const supabase = createClient();
         const [
@@ -412,7 +421,7 @@ export function ProductionCockpit() {
             supabase
               .from("process_sheets")
               .select(
-                "id,machine_code,tool_code,product_code,alloy_code,temper,revision,tool_sequence,parameters,is_active,updated_at,last_changed_by_name,last_change_reason",
+                "id,machine_code,tool_code,product_code,alloy_code,temper,revision,tool_sequence,parameters,is_active,updated_at,last_changed_by_name,last_change_reason,achieved_productivity_kg_h,achieved_productivity_recorded_at,copied_from_process_sheet_id,copied_from_sequence",
               )
               .eq("organization_id", organizationId)
               .eq("is_active", true)
@@ -462,6 +471,7 @@ export function ProductionCockpit() {
         );
         if (!found.length) {
           setSelectedId("");
+          setMissingSheetTool(raw.toUpperCase());
           setMessage("Nenhuma ficha ativa encontrada para esta ferramenta.");
           return;
         }
@@ -511,15 +521,18 @@ export function ProductionCockpit() {
         setSheets(found);
         setOrders(activeOrders);
         if (found.length) {
+          setMissingSheetTool("");
           setSelectedId(found[0].id);
           setToolInput(found[0].product_code || found[0].tool_code);
           setMessage(
             "Modo offline: receita e programação carregadas da cópia local.",
           );
-        } else
+        } else {
+          setMissingSheetTool(raw.toUpperCase());
           setMessage(
             "Nenhuma ficha local encontrada. Conecte este computador para sincronizar os dados.",
           );
+        }
       } finally {
         setLoading(false);
       }
@@ -820,6 +833,7 @@ export function ProductionCockpit() {
     producedKg: number,
     producedQuantity: number,
     notes: string,
+    achievedProductivity: number,
   ) {
     if (!chosen.length) {
       setMessage("Selecione ao menos um item para concluir.");
@@ -870,6 +884,8 @@ export function ProductionCockpit() {
             produced_quantity: Math.max(0, Math.round(orderPieces)),
             completed_by_name: operatorName,
             actual_end: new Date().toISOString(),
+            process_sheet_id: selected?.id ?? null,
+            achieved_productivity_kg_h: achievedProductivity,
             last_status_reason: [
               `Produção concluída por ${operatorName}`,
               chosen.length > 1
@@ -1205,14 +1221,36 @@ export function ProductionCockpit() {
       )}
       {!selected ? (
         <div className="grid min-h-0 flex-1 place-items-center rounded-xl border border-dashed bg-white">
-          <div className="text-center">
-            <Wrench className="mx-auto size-9 text-orange-400" />
+          <div className="max-w-lg px-6 text-center">
+            {missingSheetTool ? (
+              <FilePlus2 className="mx-auto size-10 text-orange-500" />
+            ) : (
+              <Wrench className="mx-auto size-9 text-orange-400" />
+            )}
             <h2 className="mt-3 font-heading text-lg font-bold">
-              Abra uma Ficha de Processo
+              {missingSheetTool
+                ? `Crie a ficha de ${missingSheetTool}`
+                : "Abra uma Ficha de Processo"}
             </h2>
             <p className="mt-1 text-sm text-slate-500">
-              Escolha ferramenta e corte para unir receita e programação ativa.
+              {missingSheetTool
+                ? "A ferramenta está no planejamento, mas ainda não possui receita ativa. Você pode começar em branco ou copiar o setup de uma ficha existente."
+                : "Escolha ferramenta e corte para unir receita e programação ativa."}
             </p>
+            {missingSheetTool && (
+              <Button
+                type="button"
+                className="mt-4 bg-orange-500 font-semibold hover:bg-orange-600"
+                onClick={() =>
+                  router.push(
+                    `/engenharia?nova=${encodeURIComponent(missingSheetTool)}&origem=producao`,
+                  )
+                }
+              >
+                <FilePlus2 className="size-4" />
+                Criar ficha de processo
+              </Button>
+            )}
           </div>
         </div>
       ) : (
@@ -1746,10 +1784,14 @@ export function ProductionCockpit() {
           orders={chosen}
           estimatedKg={result.kg}
           estimatedPieces={result.pieces}
+          defaultProductivity={
+            selected?.achieved_productivity_kg_h ||
+            numeric(selected?.parameters.extrusion?.target_productivity_kg_h)
+          }
           saving={savingStatus}
           onClose={() => setCompletionOpen(false)}
-          onConfirm={(kg, pieces, notes) =>
-            void completeProduction(kg, pieces, notes)
+          onConfirm={(kg, pieces, notes, productivity) =>
+            void completeProduction(kg, pieces, notes, productivity)
           }
         />
       )}
@@ -1814,7 +1856,7 @@ function ProcessSheetEditor({
         .eq("organization_id", organizationId)
         .eq("id", sheet.id)
         .select(
-          "id,machine_code,tool_code,product_code,alloy_code,temper,revision,tool_sequence,parameters,is_active,updated_at,last_changed_by_name,last_change_reason",
+          "id,machine_code,tool_code,product_code,alloy_code,temper,revision,tool_sequence,parameters,is_active,updated_at,last_changed_by_name,last_change_reason,achieved_productivity_kg_h,achieved_productivity_recorded_at,copied_from_process_sheet_id,copied_from_sequence",
         )
         .single();
       if (error) throw error;
@@ -2714,6 +2756,7 @@ function ProductionCompletionDialog({
   orders,
   estimatedKg,
   estimatedPieces,
+  defaultProductivity,
   saving,
   onClose,
   onConfirm,
@@ -2721,9 +2764,10 @@ function ProductionCompletionDialog({
   orders: Order[];
   estimatedKg: number;
   estimatedPieces: number;
+  defaultProductivity: number;
   saving: boolean;
   onClose: () => void;
-  onConfirm: (kg: number, pieces: number, notes: string) => void;
+  onConfirm: (kg: number, pieces: number, notes: string, productivity: number) => void;
 }) {
   const order = orders[0];
   const totalTargetKg = orders.reduce(
@@ -2741,7 +2785,10 @@ function ProductionCompletionDialog({
     Math.round(estimatedPieces || totalTargetPieces),
   );
   const [notes, setNotes] = useState("");
-  const valid = kg > 0 || pieces > 0;
+  const [productivity, setProductivity] = useState(
+    Number(defaultProductivity.toFixed(3)),
+  );
+  const valid = (kg > 0 || pieces > 0) && productivity > 0;
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 p-3 backdrop-blur-sm">
       <div className="w-full max-w-xl overflow-hidden rounded-2xl border bg-white shadow-2xl">
@@ -2773,7 +2820,7 @@ function ProductionCompletionDialog({
             <MiniSummary label="Prensa" value={`P${order.machine_code}`} />
             <MiniSummary label="Prazo" value={displayDueDate(order.due_date)} />
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid gap-3 sm:grid-cols-3">
             <label>
               <span className="mb-1 block text-[10px] font-bold uppercase text-slate-500">
                 Peso produzido (kg)
@@ -2786,6 +2833,22 @@ function ProductionCompletionDialog({
                 value={kg || ""}
                 onChange={(event) => setKg(Number(event.target.value) || 0)}
                 className="h-12 text-xl font-black"
+              />
+            </label>
+            <label>
+              <span className="mb-1 block text-[10px] font-bold uppercase text-slate-500">
+                Produtividade alcançada (kg/h)
+              </span>
+              <Input
+                aria-label="Produtividade alcançada em kg por hora"
+                type="number"
+                min="0.001"
+                step="0.001"
+                value={productivity || ""}
+                onChange={(event) =>
+                  setProductivity(Math.max(0, Number(event.target.value) || 0))
+                }
+                className="h-12 text-xl font-black text-emerald-700"
               />
             </label>
             <label>
@@ -2830,7 +2893,7 @@ function ProductionCompletionDialog({
           </Button>
           <Button
             disabled={!valid || saving}
-            onClick={() => onConfirm(kg, pieces, notes)}
+            onClick={() => onConfirm(kg, pieces, notes, productivity)}
             className="bg-emerald-600 font-bold hover:bg-emerald-700"
           >
             {saving ? <Loader2 className="animate-spin" /> : <Check />}

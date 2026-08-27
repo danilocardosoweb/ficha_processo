@@ -24,9 +24,12 @@ async function context() {
 export async function GET() {
   const ctx = await context();
   if (!ctx) return NextResponse.json({ error: "Sessão encerrada." }, { status: 401 });
-  const { data, error } = await ctx.supabase.rpc("local_list_users", { p_token: ctx.token });
-  if (error) return NextResponse.json({ error: "Acesso não autorizado." }, { status: 403 });
-  return NextResponse.json({ users: data ?? [] });
+  const presence = await ctx.supabase.rpc("local_list_users_with_presence", { p_token: ctx.token });
+  if (!presence.error) return NextResponse.json({ users: presence.data ?? [] });
+
+  const fallback = await ctx.supabase.rpc("local_list_users", { p_token: ctx.token });
+  if (fallback.error) return NextResponse.json({ error: "Acesso não autorizado." }, { status: 403 });
+  return NextResponse.json({ users: fallback.data ?? [] });
 }
 
 export async function POST(request: Request) {
