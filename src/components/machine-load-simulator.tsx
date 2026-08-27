@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Boxes, CalendarClock, Clock3, Flame, Gauge, GripVertical, Loader2, PackageOpen, RefreshCw, Route, Settings2, ShieldCheck, TriangleAlert } from "lucide-react";
+import { Boxes, CalendarClock, Clock3, Flame, FolderOpen, Gauge, GripVertical, Loader2, PackageOpen, RefreshCw, Route, Save, Settings2, ShieldCheck, TriangleAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { simulateMachineLoad, type LoadOrderInput, type MachineLoadSettings, type ProductivitySource, type WorkShiftInput } from "@/modules/planning/machine-load-simulator";
+import { SIMULATION_MODEL_VERSION } from "@/modules/planning/simulation";
 import { useCurrentUser } from "@/components/current-user-provider";
 
 interface RawOrder {
@@ -19,6 +20,8 @@ interface RawShift { id: string; code: string; name: string; start_time: string;
 interface ProductionSettingsPayload { settings: RawSetting[]; shifts: RawShift[]; }
 interface RawCycleOrder { production_order_id: string; tool_heating_cycles: { status: string; expected_ready_at: string | null; released_at: string | null } | null; }
 interface RawAlloy { tool_code: string; alloy_code: string; is_primary: boolean; }
+interface ScenarioSummary { id: string; name: string; description: string | null; status: string; currentVersion: number; requestedStartAt: string | null; createdAt: string; updatedAt: string; createdBy: string | null; }
+interface LoadedScenario { scenarioId: string; name: string; description: string | null; versionNumber: number; mode: "fifo" | "optimized" | "manual"; requestedStartAt: string; inputs?: { selectedMachine?: string }; result: ReturnType<typeof simulateMachineLoad>; createdAt: string; }
 
 const defaultSettings: MachineLoadSettings = { billetBarWeightKg: 415, extrusionEfficiency: 0.85, defaultProductivityKgH: 1000, setupMinutes: 20, alloyChangeMinutes: 15, toolHeatingMinutes: 240, ovenSlots: 21 };
 const numberValue = (value: unknown) => typeof value === "number" ? value : Number(String(value ?? "").replace(/\./g, "").replace(",", ".")) || 0;
@@ -29,6 +32,10 @@ const machineLabel = (code: string) => code === "18" ? "Prensa 1.8" : code === "
 const toInputDateTime = (date: Date) => { const pad = (value: number) => String(value).padStart(2, "0"); return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`; };
 const parseInputDateTime = (value: string) => { const [datePart, timePart] = value.split("T"); if (!datePart || !timePart) return null; const [year, month, day] = datePart.split("-").map(Number); const [hours, minutes] = timePart.split(":").map(Number); const date = new Date(year, month - 1, day, hours, minutes); return Number.isNaN(date.getTime()) ? null : date; };
 const sourceLabel: Record<ProductivitySource, string> = { simplificada: "Ult. Prod.", ficha: "Ficha", ferramenta: "Histórico", padrao: "Padrão" };
+
+function hydrateSimulation(value: unknown) {
+  return JSON.parse(JSON.stringify(value), (key, item) => key.endsWith("At") && typeof item === "string" ? new Date(item) : item) as ReturnType<typeof simulateMachineLoad>;
+}
 
 function readSheetProductivity(parameters: Record<string, unknown> | null) {
   if (!parameters) return 0;
@@ -50,6 +57,15 @@ export function MachineLoadSimulator() {
   const [tab, setTab] = useState<"timeline" | "billets">("timeline");
   const [startedAt, setStartedAt] = useState<Date | null>(null);
   const [startInput, setStartInput] = useState("");
+  const [scenarioPanel, setScenarioPanel] = useState<"save" | "list" | null>(null);
+  const [scenarioName, setScenarioName] = useState("");
+  const [scenarioDescription, setScenarioDescription] = useState("");
+  const [scenarioId, setScenarioId] = useState<string | null>(null);
+  const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
+  const [scenarioBusy, setScenarioBusy] = useState(false);
+  const [scenarioError, setScenarioError] = useState("");
+  const [scenarioNotice, setScenarioNotice] = useState("");
+  const [historicalScenario, setHistoricalScenario] = useState<LoadedScenario | null>(null);
 
   const load = useCallback(async function load() {
     setLoading(true); setError("");
@@ -124,10 +140,64 @@ export function MachineLoadSimulator() {
     catch (cause) { return { simulation: null, problem: cause instanceof Error ? cause.message : "Não foi possível aplicar os turnos." }; }
   }, [orderedVisibleOrders, settings, startedAt, mode, shifts]);
 
+  async function openScenarioList() {
+    setScenarioBusy(true); setScenarioError(""); setScenarioPanel("list");
+    try {
+      const response = await fetch("/api/simulation-scenarios", { cache: "no-store" });
+      const payload = await response.json().catch(() => null) as ScenarioSummary[] | { error?: string } | null;
+      if (!response.ok) throw new Error(!Array.isArray(payload) && payload?.error ? payload.error : "Não foi possível carregar os cenários.");
+      setScenarios(Array.isArray(payload) ? payload : []);
+    } catch (cause) { setScenarioError(cause instanceof Error ? cause.message : "Não foi possível carregar os cenários."); }
+    finally { setScenarioBusy(false); }
+  }
+
+  async function openSavedScenario(id: string) {
+    setScenarioBusy(true); setScenarioError("");
+    try {
+      const response = await fetch(`/api/simulation-scenarios?id=${encodeURIComponent(id)}`, { cache: "no-store" });
+      const payload = await response.json().catch(() => null) as (Omit<LoadedScenario, "result"> & { result: unknown }) | { error?: string } | null;
+      if (!response.ok || !payload || !("result" in payload)) throw new Error(payload && "error" in payload && payload.error ? payload.error : "Não foi possível abrir o cenário.");
+      const loaded: LoadedScenario = { ...payload, result: hydrateSimulation(payload.result) };
+      setHistoricalScenario(loaded);
+      setScenarioId(loaded.scenarioId);
+      setScenarioName(loaded.name);
+      setScenarioDescription(loaded.description ?? "");
+      setMode(loaded.mode);
+      const requestedStart = new Date(loaded.requestedStartAt);
+      if (!Number.isNaN(requestedStart.getTime())) { setStartedAt(requestedStart); setStartInput(toInputDateTime(requestedStart)); }
+      if (loaded.inputs?.selectedMachine) setMachine(loaded.inputs.selectedMachine);
+      setScenarioPanel(null);
+    } catch (cause) { setScenarioError(cause instanceof Error ? cause.message : "Não foi possível abrir o cenário."); }
+    finally { setScenarioBusy(false); }
+  }
+
+  async function saveScenario() {
+    if (!simulationState.simulation || !startedAt) return;
+    setScenarioBusy(true); setScenarioError("");
+    try {
+      const response = await fetch("/api/simulation-scenarios", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scenarioId, name: scenarioName, description: scenarioDescription, machineCode: machine,
+          mode, requestedStartAt: startedAt.toISOString(),
+          inputSnapshot: { selectedMachine: machine, manualOrder, orders: orderedVisibleOrders },
+          rulesSnapshot: { modelVersion: SIMULATION_MODEL_VERSION, settingsByMachine: settings, shifts },
+          resultSnapshot: simulationState.simulation,
+        }),
+      });
+      const payload = await response.json().catch(() => null) as { id?: string; versionNumber?: number; error?: string } | null;
+      if (!response.ok) throw new Error(payload?.error || "Não foi possível salvar o cenário.");
+      setScenarioId(payload?.id ?? null);
+      setScenarioNotice(`Cenário salvo com segurança como versão ${payload?.versionNumber ?? 1}.`);
+      setScenarioPanel(null);
+    } catch (cause) { setScenarioError(cause instanceof Error ? cause.message : "Não foi possível salvar o cenário."); }
+    finally { setScenarioBusy(false); }
+  }
+
   if (loading) return <div className="grid min-h-72 place-items-center rounded-2xl border bg-white"><Loader2 className="size-7 animate-spin text-orange-500" /></div>;
   if (error) return <div className="flex items-center gap-3 rounded-2xl border border-red-200 bg-red-50 p-5 text-sm font-semibold text-red-700"><TriangleAlert className="size-5" />{error}<Button variant="outline" size="sm" onClick={load}>Tentar novamente</Button></div>;
-  if (simulationState.problem) return <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900"><div className="flex items-start gap-3"><TriangleAlert className="mt-0.5 size-5 shrink-0" /><div><strong className="block">Simulação aguardando calendário de produção</strong><p className="mt-1">{simulationState.problem}</p><a href="/configuracoes/producao" className="mt-3 inline-flex rounded-xl bg-amber-900 px-3 py-2 text-xs font-bold text-white">Cadastrar ou ajustar turnos</a></div></div></div>;
-  const simulation = simulationState.simulation;
+  if (!historicalScenario && simulationState.problem) return <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900"><div className="flex items-start gap-3"><TriangleAlert className="mt-0.5 size-5 shrink-0" /><div><strong className="block">Simulação aguardando calendário de produção</strong><p className="mt-1">{simulationState.problem}</p><a href="/configuracoes/producao" className="mt-3 inline-flex rounded-xl bg-amber-900 px-3 py-2 text-xs font-bold text-white">Cadastrar ou ajustar turnos</a></div></div></div>;
+  const simulation = historicalScenario?.result ?? simulationState.simulation;
   if (!simulation) return null;
   const simulatedMachines = simulation.machines;
   const estimatedEnd = simulation.machines.reduce<Date | null>((latest, item) => !item.endsAt ? latest : !latest || item.endsAt > latest ? item.endsAt : latest, null);
@@ -151,14 +221,36 @@ export function MachineLoadSimulator() {
     });
   }
 
+  function openSavePanel() {
+    if (!scenarioName.trim()) setScenarioName(`Carga ${machine === "all" ? "todas as prensas" : machineLabel(machine)} · ${formatDateTime(startedAt)}`);
+    setScenarioError("");
+    setScenarioPanel("save");
+  }
+
+  function returnToCurrentSimulation() {
+    setHistoricalScenario(null);
+    setScenarioId(null);
+    setScenarioName("");
+    setScenarioDescription("");
+    setScenarioNotice("");
+  }
+
   return <div className="space-y-4">
+    {historicalScenario ? <section className="flex flex-wrap items-center gap-3 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950">
+      <FolderOpen className="size-5 text-blue-600" />
+      <div className="min-w-0 flex-1"><strong className="block truncate">Histórico: {historicalScenario.name} · versão {historicalScenario.versionNumber}</strong><span className="text-xs text-blue-700">Cenário congelado em {formatDateTime(new Date(historicalScenario.createdAt))}. Os dados abaixo não serão recalculados.</span></div>
+      <Button size="sm" variant="outline" onClick={returnToCurrentSimulation}>Voltar à simulação atual</Button>
+    </section> : null}
+    {scenarioNotice ? <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800"><span>{scenarioNotice}</span><button type="button" aria-label="Fechar aviso" onClick={() => setScenarioNotice("")}><X className="size-4" /></button></div> : null}
     <section className="flex flex-wrap items-center gap-2 rounded-2xl border bg-white p-3 shadow-sm">
-      <select value={machine} onChange={(event) => setMachine(event.target.value)} className="h-10 rounded-xl border bg-white px-3 text-sm font-semibold"><option value="all">{allowedMachines ? "Minhas prensas" : "Todas as prensas"}</option>{machineOptions.map((code) => <option key={code} value={code}>{machineLabel(code)}</option>)}</select>
-      <label className="flex h-10 items-center gap-2 rounded-xl border bg-white px-3 text-xs font-semibold text-slate-600">Início da simulação<input type="datetime-local" value={startInput} onChange={(event) => { setStartInput(event.target.value); const parsed = parseInputDateTime(event.target.value); if (parsed) setStartedAt(parsed); }} className="min-w-0 bg-transparent text-sm font-bold text-slate-900 outline-none" /></label>
-      <div className="flex rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setMode("fifo")} className={`rounded-lg px-3 py-2 text-xs font-bold ${mode === "fifo" ? "bg-white shadow-sm" : "text-slate-500"}`}>FIFO</button><button type="button" onClick={() => setMode("optimized")} className={`rounded-lg px-3 py-2 text-xs font-bold ${mode === "optimized" ? "bg-white shadow-sm" : "text-slate-500"}`}>Sequência sugerida</button><button type="button" onClick={activateManualMode} className={`flex items-center gap-1 rounded-lg px-3 py-2 text-xs font-bold ${mode === "manual" ? "bg-orange-500 text-white shadow-sm" : "text-slate-500"}`}><GripVertical className="size-3.5" />Sequência manual</button></div>
+      <select disabled={!!historicalScenario} value={machine} onChange={(event) => setMachine(event.target.value)} className="h-10 rounded-xl border bg-white px-3 text-sm font-semibold disabled:bg-slate-100"><option value="all">{allowedMachines ? "Minhas prensas" : "Todas as prensas"}</option>{machineOptions.map((code) => <option key={code} value={code}>{machineLabel(code)}</option>)}</select>
+      <label className="flex h-10 items-center gap-2 rounded-xl border bg-white px-3 text-xs font-semibold text-slate-600">Início da simulação<input disabled={!!historicalScenario} type="datetime-local" value={startInput} onChange={(event) => { setStartInput(event.target.value); const parsed = parseInputDateTime(event.target.value); if (parsed) setStartedAt(parsed); }} className="min-w-0 bg-transparent text-sm font-bold text-slate-900 outline-none disabled:text-slate-500" /></label>
+      <div className="flex rounded-xl bg-slate-100 p-1"><button disabled={!!historicalScenario} type="button" onClick={() => setMode("fifo")} className={`rounded-lg px-3 py-2 text-xs font-bold disabled:opacity-60 ${mode === "fifo" ? "bg-white shadow-sm" : "text-slate-500"}`}>FIFO</button><button disabled={!!historicalScenario} type="button" onClick={() => setMode("optimized")} className={`rounded-lg px-3 py-2 text-xs font-bold disabled:opacity-60 ${mode === "optimized" ? "bg-white shadow-sm" : "text-slate-500"}`}>Sequência sugerida</button><button disabled={!!historicalScenario} type="button" onClick={activateManualMode} className={`flex items-center gap-1 rounded-lg px-3 py-2 text-xs font-bold disabled:opacity-60 ${mode === "manual" ? "bg-orange-500 text-white shadow-sm" : "text-slate-500"}`}><GripVertical className="size-3.5" />Sequência manual</button></div>
       <span className="ml-auto text-xs text-slate-500">Base: {formatDateTime(startedAt)}</span>
       <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-bold text-emerald-700">{shifts.filter((shift) => shift.isActive).map((shift) => `${shift.code} ${shift.startTime}–${shift.endTime}`).join(" · ")}</span>
-      <Button variant="outline" size="sm" onClick={load}><RefreshCw className="size-4" />Atualizar</Button>
+      <Button variant="outline" size="sm" onClick={() => void openScenarioList()}><FolderOpen className="size-4" />Cenários</Button>
+      {canPlan && !historicalScenario ? <Button size="sm" onClick={openSavePanel}><Save className="size-4" />Salvar cenário</Button> : null}
+      <Button variant="outline" size="sm" disabled={!!historicalScenario} onClick={load}><RefreshCw className="size-4" />Atualizar</Button>
     </section>
 
     <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
@@ -173,9 +265,51 @@ export function MachineLoadSimulator() {
 
     <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
       <div className="flex items-center justify-between border-b px-4 py-3"><div><h2 className="font-heading font-bold text-slate-900">Simulação operacional</h2><p className="text-xs text-slate-500">Prensa + ferramenta/forno + tarugo/liga.</p></div><div className="flex rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setTab("timeline")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "timeline" ? "bg-white shadow-sm" : "text-slate-500"}`}><Clock3 className="mr-1 inline size-3.5" />Linha do tempo</button><button type="button" onClick={() => setTab("billets")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "billets" ? "bg-white shadow-sm" : "text-slate-500"}`}><PackageOpen className="mr-1 inline size-3.5" />Carga de tarugo</button></div></div>
-      {tab === "timeline" ? <Timeline machines={simulation.machines} manual={mode === "manual"} onMove={moveManualOrder} /> : <BilletTable billets={simulation.billets} settings={settings} />}
+      {tab === "timeline" ? <Timeline machines={simulation.machines} manual={!historicalScenario && mode === "manual"} onMove={moveManualOrder} /> : <BilletTable billets={simulation.billets} settings={settings} />}
     </section>
     <div className="flex items-start gap-2 rounded-xl bg-blue-50 px-4 py-3 text-xs text-blue-800"><Settings2 className="mt-0.5 size-4 shrink-0" /><p><strong>Premissas da V1:</strong> barra de 415 kg, eficiência de 85% e 21 vagas por prensa. As 4 h são a regra operacional cadastrada e a cobertura térmica respeita os turnos. Estoque físico ainda é apresentado como carga necessária.</p></div>
+    {scenarioPanel ? <ScenarioDialog mode={scenarioPanel} name={scenarioName} description={scenarioDescription} scenarios={scenarios} busy={scenarioBusy} error={scenarioError} scenarioId={scenarioId} onName={setScenarioName} onDescription={setScenarioDescription} onClose={() => { setScenarioPanel(null); setScenarioError(""); }} onSave={() => void saveScenario()} onOpen={(id) => void openSavedScenario(id)} /> : null}
+  </div>;
+}
+
+function ScenarioDialog({ mode, name, description, scenarios, busy, error, scenarioId, onName, onDescription, onClose, onSave, onOpen }: {
+  mode: "save" | "list";
+  name: string;
+  description: string;
+  scenarios: ScenarioSummary[];
+  busy: boolean;
+  error: string;
+  scenarioId: string | null;
+  onName: (value: string) => void;
+  onDescription: (value: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+  onOpen: (id: string) => void;
+}) {
+  return <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 p-4" role="dialog" aria-modal="true" aria-labelledby="scenario-dialog-title">
+    <section className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border bg-white shadow-2xl">
+      <header className="flex items-start gap-3 border-b px-5 py-4">
+        <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-orange-50 text-orange-600">{mode === "save" ? <Save className="size-5" /> : <FolderOpen className="size-5" />}</span>
+        <div className="min-w-0 flex-1"><h2 id="scenario-dialog-title" className="font-heading text-lg font-black text-slate-950">{mode === "save" ? (scenarioId ? "Salvar nova versão" : "Salvar cenário") : "Cenários salvos"}</h2><p className="text-xs text-slate-500">{mode === "save" ? "Guarde entradas, regras e resultados para consulta e comparação futura." : "Abra uma fotografia histórica sem recalcular os valores."}</p></div>
+        <button type="button" aria-label="Fechar" onClick={onClose} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><X className="size-5" /></button>
+      </header>
+
+      <div className="overflow-y-auto p-5">
+        {error ? <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">{error}</div> : null}
+        {mode === "save" ? <div className="space-y-4">
+          {scenarioId ? <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-800"><strong>Versionamento ativo.</strong> Este salvamento criará uma nova versão imutável do cenário selecionado.</div> : null}
+          <label className="block text-sm font-bold text-slate-800">Nome do cenário<input autoFocus value={name} onChange={(event) => onName(event.target.value)} maxLength={120} placeholder="Ex.: Carga P1.8 · turno B" className="mt-1.5 h-11 w-full rounded-xl border px-3 font-medium outline-none focus:border-orange-400 focus:ring-2 focus:ring-orange-100" /></label>
+          <label className="block text-sm font-bold text-slate-800">Descrição <span className="font-normal text-slate-400">(opcional)</span><textarea value={description} onChange={(event) => onDescription(event.target.value)} maxLength={500} rows={3} placeholder="Registre a hipótese, prioridade ou decisão que está sendo avaliada." className="mt-1.5 w-full resize-none rounded-xl border px-3 py-2 font-medium outline-none focus:border-orange-400 focus:ring-2 focus:ring-orange-100" /></label>
+        </div> : busy ? <div className="grid min-h-40 place-items-center"><Loader2 className="size-6 animate-spin text-orange-500" /></div> : scenarios.length ? <div className="space-y-2">
+          {scenarios.map((scenario) => <article key={scenario.id} className="flex flex-wrap items-center gap-3 rounded-xl border p-3 hover:border-orange-200 hover:bg-orange-50/30">
+            <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><strong className="truncate text-sm text-slate-950">{scenario.name}</strong><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-600">v{scenario.currentVersion}</span></div><p className="mt-1 truncate text-xs text-slate-500">{scenario.description || "Sem descrição"}</p><p className="mt-1 text-[11px] text-slate-400">Simulação: {scenario.requestedStartAt ? formatDateTime(new Date(scenario.requestedStartAt)) : "—"} · salva por {scenario.createdBy || "usuário"}</p></div>
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => onOpen(scenario.id)}><FolderOpen className="size-4" />Abrir</Button>
+          </article>)}
+        </div> : <div className="grid min-h-40 place-items-center rounded-xl border border-dashed text-center"><div><FolderOpen className="mx-auto mb-2 size-7 text-slate-300" /><p className="text-sm font-bold text-slate-700">Nenhum cenário salvo</p><p className="text-xs text-slate-400">Salve uma simulação para iniciar o histórico.</p></div></div>}
+      </div>
+
+      <footer className="flex justify-end gap-2 border-t bg-slate-50 px-5 py-3"><Button variant="outline" onClick={onClose}>Cancelar</Button>{mode === "save" ? <Button disabled={busy || !name.trim()} onClick={onSave}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}{scenarioId ? "Salvar nova versão" : "Salvar cenário"}</Button> : null}</footer>
+    </section>
   </div>;
 }
 

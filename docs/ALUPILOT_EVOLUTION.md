@@ -26,7 +26,7 @@ Este documento é o registro vivo da evolução do sistema. Ele existe para pres
 | Produção | Implementada | Assistente, início/conclusão e cálculo de tarugos. |
 | Fornos | Implementada | 3 fornos × 7 posições por prensa, aquecimento e liberação. |
 | Paradas | Implementada | Catálogos, turnos, abertura e encerramento. |
-| Carga Máquina | Parcial | Simulação determinística em memória, sem cenários persistidos. |
+| Carga Máquina | Parcial | Simulação determinística com interface de cenários e versionamento preparada; a persistência depende da aplicação da migration no Supabase. |
 | Estoque físico de tarugos | Não existe | Hoje o cálculo representa necessidade teórica. |
 | Carcaças como recurso | Não existe | Há dados de carcaça, mas não agenda/reserva. |
 | Otimização explicável | Não existe | A sequência sugerida usa heurísticas fixas. |
@@ -103,3 +103,7 @@ Interface
 - documentada a arquitetura evolutiva;
 - iniciado o contrato versionado de cenários;
 - Furos e BO incluídos como entradas rastreáveis, sem alterar cálculos.
+- criada a API de cenários da Carga Máquina;
+- adicionada a interface para salvar, listar e reabrir cenários históricos em modo somente leitura;
+- cada novo salvamento do mesmo cenário gera uma versão imutável com entradas, regras, resultados e recursos;
+- preparada a migration de cenários, versões, itens e eventos de recursos com acesso pelas sessões locais do TecnoMES.

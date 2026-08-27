@@ -101,43 +101,175 @@ alter table public.simulation_versions enable row level security;
 alter table public.simulation_version_items enable row level security;
 alter table public.simulation_resource_events enable row level security;
 
-do $$
-declare
-  table_name text;
-begin
-  foreach table_name in array array[
-    'simulation_scenarios',
-    'simulation_versions',
-    'simulation_version_items',
-    'simulation_resource_events'
-  ] loop
-    execute format(
-      'create policy %I on public.%I for select to authenticated using (organization_id in (select private.authorized_org_ids()))',
-      table_name || '_select', table_name
-    );
-    execute format(
-      'create policy %I on public.%I for insert to authenticated with check (organization_id in (select private.authorized_org_ids()))',
-      table_name || '_insert', table_name
-    );
-    execute format(
-      'create policy %I on public.%I for update to authenticated using (organization_id in (select private.authorized_org_ids())) with check (organization_id in (select private.authorized_org_ids()))',
-      table_name || '_update', table_name
-    );
-    execute format(
-      'create policy %I on public.%I for delete to authenticated using (organization_id in (select private.authorized_org_ids()))',
-      table_name || '_delete', table_name
-    );
-  end loop;
-end $$;
-
 revoke all on public.simulation_scenarios from public, anon;
 revoke all on public.simulation_versions from public, anon;
 revoke all on public.simulation_version_items from public, anon;
 revoke all on public.simulation_resource_events from public, anon;
+revoke all on public.simulation_scenarios from authenticated;
+revoke all on public.simulation_versions from authenticated;
+revoke all on public.simulation_version_items from authenticated;
+revoke all on public.simulation_resource_events from authenticated;
 
-grant select, insert, update, delete on public.simulation_scenarios to authenticated;
-grant select, insert, update, delete on public.simulation_versions to authenticated;
-grant select, insert, update, delete on public.simulation_version_items to authenticated;
-grant select, insert, update, delete on public.simulation_resource_events to authenticated;
-grant usage, select on sequence public.simulation_version_items_id_seq to authenticated;
-grant usage, select on sequence public.simulation_resource_events_id_seq to authenticated;
+-- The application uses its own opaque local session, not Supabase Auth. All
+-- access therefore goes through token-aware RPCs and the tables remain closed.
+create or replace function public.local_list_simulation_scenarios(p_token text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_actor uuid;
+  v_org uuid;
+begin
+  v_actor := private.require_local_session(p_token, false);
+  select organization_id into v_org from private.local_users where id = v_actor;
+
+  return coalesce((
+    select jsonb_agg(jsonb_build_object(
+      'id', s.id,
+      'name', s.name,
+      'description', s.description,
+      'status', s.status,
+      'scope', s.scope,
+      'currentVersion', s.current_version,
+      'requestedStartAt', s.requested_start_at,
+      'createdAt', s.created_at,
+      'updatedAt', s.updated_at,
+      'createdBy', coalesce(u.full_name, u.username)
+    ) order by s.updated_at desc)
+    from public.simulation_scenarios s
+    left join private.local_users u on u.id = s.created_by_user_id
+    where s.organization_id = v_org
+      and s.status <> 'archived'
+  ), '[]'::jsonb);
+end;
+$$;
+
+create or replace function public.local_get_simulation_scenario(
+  p_token text,
+  p_scenario_id uuid,
+  p_version_number integer default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_actor uuid;
+  v_org uuid;
+  v_result jsonb;
+begin
+  v_actor := private.require_local_session(p_token, false);
+  select organization_id into v_org from private.local_users where id = v_actor;
+
+  select jsonb_build_object(
+    'scenarioId', s.id,
+    'name', s.name,
+    'description', s.description,
+    'status', s.status,
+    'versionNumber', v.version_number,
+    'modelVersion', v.model_version,
+    'mode', v.mode,
+    'requestedStartAt', v.requested_start_at,
+    'inputs', v.input_snapshot,
+    'rules', v.rules_snapshot,
+    'result', v.result_snapshot,
+    'createdAt', v.created_at
+  ) into v_result
+  from public.simulation_scenarios s
+  join public.simulation_versions v on v.scenario_id = s.id
+  where s.id = p_scenario_id
+    and s.organization_id = v_org
+    and v.version_number = coalesce(p_version_number, s.current_version);
+
+  if v_result is null then
+    raise exception 'Cenário de simulação não encontrado.';
+  end if;
+  return v_result;
+end;
+$$;
+
+create or replace function public.local_save_simulation_scenario(
+  p_token text,
+  p_scenario_id uuid,
+  p_name text,
+  p_description text,
+  p_machine_code text,
+  p_mode text,
+  p_requested_start_at timestamptz,
+  p_input_snapshot jsonb,
+  p_rules_snapshot jsonb,
+  p_result_snapshot jsonb
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_actor uuid;
+  v_org uuid;
+  v_role text;
+  v_scenario_id uuid;
+  v_version integer;
+begin
+  v_actor := private.require_local_session(p_token, false);
+  select organization_id, role into v_org, v_role from private.local_users where id = v_actor;
+  if v_role not in ('admin', 'pcp') then
+    raise exception 'Somente Administrador ou PCP pode salvar cenários.';
+  end if;
+  if btrim(coalesce(p_name, '')) = '' then raise exception 'Informe o nome do cenário.'; end if;
+  if p_mode not in ('fifo', 'optimized', 'manual') then raise exception 'Modo de simulação inválido.'; end if;
+  if jsonb_typeof(p_input_snapshot) <> 'object' or jsonb_typeof(p_rules_snapshot) <> 'object' or jsonb_typeof(p_result_snapshot) <> 'object' then
+    raise exception 'Snapshots da simulação inválidos.';
+  end if;
+
+  if p_scenario_id is null then
+    insert into public.simulation_scenarios (
+      organization_id, name, description, requested_start_at, scope,
+      created_by_user_id, updated_by_user_id
+    ) values (
+      v_org, btrim(p_name), nullif(btrim(coalesce(p_description, '')), ''),
+      p_requested_start_at, jsonb_build_object('machineCode', p_machine_code), v_actor, v_actor
+    ) returning id into v_scenario_id;
+    v_version := 1;
+  else
+    select id, current_version + 1 into v_scenario_id, v_version
+    from public.simulation_scenarios
+    where id = p_scenario_id and organization_id = v_org
+    for update;
+    if v_scenario_id is null then raise exception 'Cenário não encontrado.'; end if;
+    update public.simulation_scenarios set
+      name = btrim(p_name),
+      description = nullif(btrim(coalesce(p_description, '')), ''),
+      requested_start_at = p_requested_start_at,
+      scope = jsonb_build_object('machineCode', p_machine_code),
+      updated_by_user_id = v_actor
+    where id = v_scenario_id;
+  end if;
+
+  insert into public.simulation_versions (
+    organization_id, scenario_id, version_number, model_version, mode,
+    requested_start_at, input_snapshot, rules_snapshot, result_snapshot,
+    created_by_user_id
+  ) values (
+    v_org, v_scenario_id, v_version, 'alupilot-v1', p_mode,
+    p_requested_start_at, p_input_snapshot, p_rules_snapshot, p_result_snapshot, v_actor
+  );
+
+  update public.simulation_scenarios
+  set current_version = v_version, status = 'calculated', updated_by_user_id = v_actor
+  where id = v_scenario_id;
+
+  return jsonb_build_object('id', v_scenario_id, 'versionNumber', v_version);
+end;
+$$;
+
+revoke all on function public.local_list_simulation_scenarios(text) from public;
+revoke all on function public.local_get_simulation_scenario(text, uuid, integer) from public;
+revoke all on function public.local_save_simulation_scenario(text, uuid, text, text, text, text, timestamptz, jsonb, jsonb, jsonb) from public;
+grant execute on function public.local_list_simulation_scenarios(text) to anon, authenticated;
+grant execute on function public.local_get_simulation_scenario(text, uuid, integer) to anon, authenticated;
+grant execute on function public.local_save_simulation_scenario(text, uuid, text, text, text, text, timestamptz, jsonb, jsonb, jsonb) to anon, authenticated;
