@@ -28,7 +28,7 @@ Este documento é o registro vivo da evolução do sistema. Ele existe para pres
 | Paradas | Implementada | Catálogos, turnos, abertura e encerramento. |
 | Carga Máquina | Parcial | Simulação determinística com interface de cenários e versionamento preparada; a persistência depende da aplicação da migration no Supabase. |
 | Estoque físico de tarugos | Preparado localmente | Cadastro por liga/lote, reservas e confronto com a carga foram implementados; a persistência depende da aplicação da migration no Supabase. |
-| Carcaças como recurso | Não existe | Há dados de carcaça, mas não agenda/reserva. |
+| Carcaças como recurso | Preparado localmente | Cadastro por prensa, disponibilidade, reservas futuras e alertas no simulador; depende da migration no Supabase. |
 | Otimização explicável | Não existe | A sequência sugerida usa heurísticas fixas. |
 
 ## Recursos do simulador
@@ -112,3 +112,7 @@ Interface
 - integrada a disponibilidade real à Carga Máquina, com cobertura por liga e alerta de risco de parada por falta de material;
 - snapshots de cenários passaram a registrar a fotografia do estoque usada na análise;
 - nenhuma migration foi aplicada remotamente e nenhum repositório remoto foi atualizado nesta etapa.
+- Furos, BO e Carcaça passaram a ser lidos das ferramentas/receitas e exibidos em cada item da Carga Máquina;
+- criado o cadastro de carcaças físicas por prensa, com quantidade total, indisponível, reservada e livre;
+- o simulador passou a alertar carcaça ausente ou indisponível na prensa correta e a registrar a fotografia desses recursos no cenário;
+- Furos e BO permanecem rastreados, sem alterar produtividade ou duração até existir regra validada pela Engenharia.

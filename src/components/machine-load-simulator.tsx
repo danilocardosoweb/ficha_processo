@@ -14,7 +14,7 @@ interface RawOrder {
   status: string; last_productivity_kg_h: number | string | null;
 }
 interface RawSheet { tool_code: string; machine_code: string | null; parameters: Record<string, unknown> | null; }
-interface RawTool { code: string; matrix_code: string | null; productivity_kg_h: string | null; }
+interface RawTool { code: string; matrix_code: string | null; productivity_kg_h: string | null; holes: number | null; bo: string | null; }
 interface RawSetting { machine_code: string; billet_bar_weight_kg: number | string; extrusion_efficiency: number | string; default_productivity_kg_h: number | string; setup_minutes: number; alloy_change_minutes: number; tool_heating_minutes: number; }
 interface RawShift { id: string; code: string; name: string; start_time: string; end_time: string; break_minutes: number; machine_codes: string[]; is_active: boolean; }
 interface ProductionSettingsPayload { settings: RawSetting[]; shifts: RawShift[]; }
@@ -22,8 +22,9 @@ interface RawCycleOrder { production_order_id: string; tool_heating_cycles: { st
 interface RawAlloy { tool_code: string; alloy_code: string; is_primary: boolean; }
 interface BilletStockSummary { alloyCode: string; lotCount: number; totalBars: number; reservedBars: number; availableBars: number; totalWeightKg: number | string; availableWeightKg: number | string; }
 interface BilletStockPayload { summary: BilletStockSummary[]; }
+interface CarcassResource { id: string; machineCode: string; carcassCode: string; totalQuantity: number; unavailableQuantity: number; reservedQuantity: number; availableQuantity: number; status: "available" | "maintenance" | "blocked" | "inactive"; location: string | null; }
 interface ScenarioSummary { id: string; name: string; description: string | null; status: string; currentVersion: number; requestedStartAt: string | null; createdAt: string; updatedAt: string; createdBy: string | null; }
-interface LoadedScenario { scenarioId: string; name: string; description: string | null; versionNumber: number; mode: "fifo" | "optimized" | "manual"; requestedStartAt: string; inputs?: { selectedMachine?: string }; rules?: { billetStock?: { capturedAt?: string; summary?: BilletStockSummary[] } }; result: ReturnType<typeof simulateMachineLoad>; createdAt: string; }
+interface LoadedScenario { scenarioId: string; name: string; description: string | null; versionNumber: number; mode: "fifo" | "optimized" | "manual"; requestedStartAt: string; inputs?: { selectedMachine?: string }; rules?: { billetStock?: { capturedAt?: string; summary?: BilletStockSummary[] }; carcassResources?: { capturedAt?: string; items?: CarcassResource[] } }; result: ReturnType<typeof simulateMachineLoad>; createdAt: string; }
 
 const defaultSettings: MachineLoadSettings = { billetBarWeightKg: 415, extrusionEfficiency: 0.85, defaultProductivityKgH: 1000, setupMinutes: 20, alloyChangeMinutes: 15, toolHeatingMinutes: 240, ovenSlots: 21 };
 const numberValue = (value: unknown) => typeof value === "number" ? value : Number(String(value ?? "").replace(/\./g, "").replace(",", ".")) || 0;
@@ -44,6 +45,11 @@ function readSheetProductivity(parameters: Record<string, unknown> | null) {
   return numberValue(parameters.target_productivity_kg_h ?? parameters.productivity_kg_h ?? parameters.produtividade_kg_h ?? parameters.produtividade);
 }
 
+function nestedRecord(parameters: Record<string, unknown> | null, key: string) {
+  const value = parameters?.[key];
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
 export function MachineLoadSimulator() {
   const { role, machine_codes: userMachineCodes } = useCurrentUser();
   const canPlan = role === "admin" || role === "pcp";
@@ -53,6 +59,8 @@ export function MachineLoadSimulator() {
   const [shifts, setShifts] = useState<WorkShiftInput[]>([]);
   const [billetStock, setBilletStock] = useState<BilletStockSummary[]>([]);
   const [billetStockAvailable, setBilletStockAvailable] = useState(false);
+  const [carcassResources, setCarcassResources] = useState<CarcassResource[]>([]);
+  const [carcassResourcesAvailable, setCarcassResourcesAvailable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [mode, setMode] = useState<"fifo" | "optimized" | "manual">("optimized");
@@ -78,14 +86,15 @@ export function MachineLoadSimulator() {
       const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
       if (!organizationId) throw new Error("Organização padrão não configurada.");
       const supabase = createClient();
-      const [ordersResult, sheetsResult, toolsResult, cyclesResult, alloysResult, productionSettingsResponse, billetStockResponse] = await Promise.all([
+      const [ordersResult, sheetsResult, toolsResult, cyclesResult, alloysResult, productionSettingsResponse, billetStockResponse, carcassResponse] = await Promise.all([
         supabase.from("production_orders").select("id,order_number,plan_code,machine_code,tool_code,alloy_code,target_kg,produced_kg,sequence,due_date,status,last_productivity_kg_h").eq("organization_id", organizationId).eq("is_active", true).in("status", ["planned", "released", "in_progress", "paused"]).order("machine_code").order("sequence"),
         supabase.from("process_sheets").select("tool_code,machine_code,parameters").eq("organization_id", organizationId).eq("is_active", true),
-        supabase.from("tools").select("code,matrix_code,productivity_kg_h").eq("organization_id", organizationId),
+        supabase.from("tools").select("code,matrix_code,productivity_kg_h,holes,bo").eq("organization_id", organizationId),
         supabase.from("tool_heating_cycle_orders").select("production_order_id,tool_heating_cycles!inner(status,expected_ready_at,released_at,organization_id)").eq("tool_heating_cycles.organization_id", organizationId).in("tool_heating_cycles.status", ["heating", "released"]),
         supabase.from("tool_alloy_options").select("tool_code,alloy_code,is_primary").eq("organization_id", organizationId).eq("is_active", true).order("priority"),
         fetch("/api/production-settings", { cache: "no-store" }),
         fetch("/api/billet-stock", { cache: "no-store" }),
+        fetch("/api/press-resources", { cache: "no-store" }),
       ]);
       const firstError = [ordersResult.error, sheetsResult.error, toolsResult.error, cyclesResult.error, alloysResult.error].find(Boolean);
       if (firstError) throw firstError;
@@ -94,6 +103,9 @@ export function MachineLoadSimulator() {
       const stockPayload = await billetStockResponse.json().catch(() => null) as BilletStockPayload | null;
       setBilletStock(billetStockResponse.ok ? stockPayload?.summary ?? [] : []);
       setBilletStockAvailable(billetStockResponse.ok);
+      const carcassPayload = await carcassResponse.json().catch(() => null) as CarcassResource[] | null;
+      setCarcassResources(carcassResponse.ok && Array.isArray(carcassPayload) ? carcassPayload : []);
+      setCarcassResourcesAvailable(carcassResponse.ok);
       const rawOrders = (ordersResult.data ?? []) as RawOrder[];
       const rawSheets = (sheetsResult.data ?? []) as RawSheet[];
       const rawTools = (toolsResult.data ?? []) as RawTool[];
@@ -108,12 +120,14 @@ export function MachineLoadSimulator() {
       const input = rawOrders.map((order) => {
         const sheet = rawSheets.find((item) => item.tool_code.toUpperCase() === order.tool_code.toUpperCase() && (!item.machine_code || item.machine_code === order.machine_code));
         const tool = rawTools.find((item) => [item.code, item.matrix_code].filter(Boolean).some((code) => code!.toUpperCase() === order.tool_code.toUpperCase()));
+        const sheetExtrusion = nestedRecord(sheet?.parameters ?? null, "extrusion");
+        const sheetBillet = nestedRecord(sheet?.parameters ?? null, "billet");
         const sources: Array<[number, ProductivitySource]> = [[numberValue(order.last_productivity_kg_h), "simplificada"], [readSheetProductivity(sheet?.parameters ?? null), "ficha"], [numberValue(tool?.productivity_kg_h), "ferramenta"], [settingMap[order.machine_code]?.defaultProductivityKgH ?? 1000, "padrao"]];
         const productivity = sources.find(([value]) => value > 0) ?? [1000, "padrao" as const];
         const cycle = rawCycles.find((item) => item.production_order_id === order.id)?.tool_heating_cycles;
         const toolHeatingState = cycle?.status === "released" ? "released" : cycle?.status === "heating" ? "heating" : "waiting";
         const toolReadyAt = cycle?.status === "released" ? new Date() : cycle?.expected_ready_at ? new Date(cycle.expected_ready_at) : null;
-        return { id: order.id, orderNumber: order.order_number, planCode: order.plan_code ?? "—", machineCode: order.machine_code, toolCode: order.tool_code, alloyCode: order.alloy_code ?? "SEM LIGA", alternativeAlloys: rawAlloys.filter((item) => item.tool_code.toUpperCase() === order.tool_code.toUpperCase() && !item.is_primary).map((item) => item.alloy_code), targetKg: numberValue(order.target_kg), producedKg: numberValue(order.produced_kg), sequence: order.sequence ?? 9999, dueDate: order.due_date, status: order.status, productivityKgH: productivity[0] as number, productivitySource: productivity[1] as ProductivitySource, toolReadyAt, toolHeatingState } satisfies LoadOrderInput;
+        return { id: order.id, orderNumber: order.order_number, planCode: order.plan_code ?? "—", machineCode: order.machine_code, toolCode: order.tool_code, alloyCode: order.alloy_code ?? "SEM LIGA", alternativeAlloys: rawAlloys.filter((item) => item.tool_code.toUpperCase() === order.tool_code.toUpperCase() && !item.is_primary).map((item) => item.alloy_code), targetKg: numberValue(order.target_kg), producedKg: numberValue(order.produced_kg), sequence: order.sequence ?? 9999, dueDate: order.due_date, status: order.status, productivityKgH: productivity[0] as number, productivitySource: productivity[1] as ProductivitySource, toolReadyAt, toolHeatingState, holes: numberValue(sheetExtrusion.holes) || tool?.holes || null, boCode: tool?.bo?.trim() || null, carcassCode: String(sheetBillet.casing ?? "").trim() || null } satisfies LoadOrderInput;
       });
       setOrders(input); setSettings(settingMap);
       setShifts((productionSettings.shifts ?? []).map((shift) => ({ id: shift.id, code: shift.code, name: shift.name, startTime: shift.start_time.slice(0, 5), endTime: shift.end_time.slice(0, 5), breakMinutes: shift.break_minutes, machineCodes: shift.machine_codes ?? [], isActive: shift.is_active })));
@@ -189,7 +203,7 @@ export function MachineLoadSimulator() {
           scenarioId, name: scenarioName, description: scenarioDescription, machineCode: machine,
           mode, requestedStartAt: startedAt.toISOString(),
           inputSnapshot: { selectedMachine: machine, manualOrder, orders: orderedVisibleOrders },
-          rulesSnapshot: { modelVersion: SIMULATION_MODEL_VERSION, settingsByMachine: settings, shifts, billetStock: { capturedAt: new Date().toISOString(), summary: billetStock } },
+          rulesSnapshot: { modelVersion: SIMULATION_MODEL_VERSION, settingsByMachine: settings, shifts, billetStock: { capturedAt: new Date().toISOString(), summary: billetStock }, carcassResources: { capturedAt: new Date().toISOString(), items: carcassResources } },
           resultSnapshot: simulationState.simulation,
         }),
       });
@@ -210,6 +224,8 @@ export function MachineLoadSimulator() {
   const simulatedMachines = simulation.machines;
   const displayedBilletStock = historicalScenario ? historicalScenario.rules?.billetStock?.summary ?? [] : billetStock;
   const hasBilletStockSnapshot = historicalScenario ? !!historicalScenario.rules?.billetStock : billetStockAvailable;
+  const displayedCarcassResources = historicalScenario ? historicalScenario.rules?.carcassResources?.items ?? [] : carcassResources;
+  const hasCarcassSnapshot = historicalScenario ? !!historicalScenario.rules?.carcassResources : carcassResourcesAvailable;
   const estimatedEnd = simulation.machines.reduce<Date | null>((latest, item) => !item.endsAt ? latest : !latest || item.endsAt > latest ? item.endsAt : latest, null);
   function activateManualMode() {
     if (mode !== "manual") {
@@ -273,6 +289,7 @@ export function MachineLoadSimulator() {
     <ThermalCoveragePanel machines={simulation.machines} />
     <AlloyWarnings machines={simulation.machines} />
     <BilletStockWarnings billets={simulation.billets} stock={displayedBilletStock} available={hasBilletStockSnapshot} />
+    <PressResourceWarnings machines={simulation.machines} resources={displayedCarcassResources} available={hasCarcassSnapshot} />
 
     <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
       <div className="flex items-center justify-between border-b px-4 py-3"><div><h2 className="font-heading font-bold text-slate-900">Simulação operacional</h2><p className="text-xs text-slate-500">Prensa + ferramenta/forno + tarugo/liga.</p></div><div className="flex rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setTab("timeline")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "timeline" ? "bg-white shadow-sm" : "text-slate-500"}`}><Clock3 className="mr-1 inline size-3.5" />Linha do tempo</button><button type="button" onClick={() => setTab("billets")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "billets" ? "bg-white shadow-sm" : "text-slate-500"}`}><PackageOpen className="mr-1 inline size-3.5" />Carga de tarugo</button></div></div>
@@ -380,6 +397,22 @@ function BilletStockWarnings({ billets, stock, available }: { billets: ReturnTyp
   return <section className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-900"><div className="flex items-start gap-2"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-red-600" /><div><p className="font-black">Risco de parada por falta de tarugo</p><div className="mt-1 space-y-1">{shortages.map((item) => <p key={item.alloyCode}>Liga <strong>{item.alloyCode}</strong>: precisa de {item.required} barra(s), possui {item.available} livre(s) e faltam <strong>{item.shortage}</strong>.</p>)}</div></div></div></section>;
 }
 
+function PressResourceWarnings({ machines, resources, available }: { machines: ReturnType<typeof simulateMachineLoad>["machines"]; resources: CarcassResource[]; available: boolean }) {
+  const items = machines.flatMap((machine) => machine.items);
+  const missingHoles = items.filter((item) => !item.holes).length;
+  const missingBo = items.filter((item) => !item.boCode).length;
+  const missingCarcass = items.filter((item) => !item.carcassCode).length;
+  const requirements = [...new Map(items.filter((item) => item.carcassCode).map((item) => [`${item.machineCode}|${item.carcassCode!.trim().toUpperCase()}`, { machineCode: item.machineCode, carcassCode: item.carcassCode! }])).values()];
+  const unavailable = available ? requirements.filter((requirement) => {
+    const resource = resources.find((item) => item.machineCode === requirement.machineCode && item.carcassCode.trim().toUpperCase() === requirement.carcassCode.trim().toUpperCase());
+    return !resource || resource.availableQuantity < 1;
+  }) : [];
+  const hasIncompleteData = missingHoles > 0 || missingBo > 0 || missingCarcass > 0;
+  if (!available) return <div className="flex flex-wrap items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-800"><Boxes className="size-4 shrink-0" /><p className="flex-1"><strong>Disponibilidade de carcaças ainda não ativada.</strong> Furos, BO e carcaça já são registrados no cenário, porém a capacidade física ainda não pode ser confirmada.</p></div>;
+  if (unavailable.length) return <section className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-900"><div className="flex items-start gap-2"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-red-600" /><div><p className="font-black">Risco de recurso físico indisponível</p>{unavailable.map((item) => <p key={`${item.machineCode}-${item.carcassCode}`} className="mt-1">{machineLabel(item.machineCode)} precisa da carcaça <strong>{item.carcassCode}</strong>, mas não há unidade livre cadastrada.</p>)}{hasIncompleteData ? <p className="mt-2 text-red-700">Dados incompletos: {missingHoles} item(ns) sem furos, {missingBo} sem BO e {missingCarcass} sem carcaça.</p> : null}</div></div></section>;
+  return <div className={`flex items-center gap-2 rounded-xl border px-4 py-3 text-xs ${hasIncompleteData ? "border-amber-200 bg-amber-50 text-amber-900" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}><Boxes className="size-4 shrink-0" /><p><strong>{hasIncompleteData ? "Recursos cobertos, com cadastros incompletos." : "Carcaças cobertas."}</strong> {hasIncompleteData ? `${missingHoles} item(ns) sem furos, ${missingBo} sem BO e ${missingCarcass} sem carcaça.` : "Todas as carcaças informadas possuem unidade livre na prensa correta; Furos e BO permanecem rastreados no cenário."}</p></div>;
+}
+
 function Timeline({ machines, manual, onMove }: {
   machines: ReturnType<typeof simulateMachineLoad>["machines"];
   manual: boolean;
@@ -429,7 +462,7 @@ function Timeline({ machines, manual, onMove }: {
             onDragEnd={() => { setDraggedId(null); setOverId(null); }}
             className={`border-t transition ${manual ? "cursor-grab active:cursor-grabbing" : ""} ${draggedId === item.id ? "opacity-40" : ""} ${overId === item.id ? "bg-orange-100 ring-2 ring-inset ring-orange-400" : "hover:bg-orange-50/30"}`}
           >
-            <td className="px-3 py-2.5"><span className="inline-flex items-center"><span className="mr-2 text-slate-400">{String(index + 1).padStart(2, "0")}</span>{manual && <GripVertical className="mr-2 size-4 text-orange-500" aria-label={`Arrastar ${item.toolCode}`} />}<strong className="font-mono text-orange-600">{item.toolCode}</strong></span></td>
+            <td className="px-3 py-2.5"><span className="inline-flex items-center"><span className="mr-2 text-slate-400">{String(index + 1).padStart(2, "0")}</span>{manual && <GripVertical className="mr-2 size-4 text-orange-500" aria-label={`Arrastar ${item.toolCode}`} />}<strong className="font-mono text-orange-600">{item.toolCode}</strong></span><span className="mt-1 block pl-6 text-[9px] text-slate-400">{item.holes ? `${item.holes} furo(s)` : "Furos não informados"}{item.boCode ? ` · BO ${item.boCode}` : ""}{item.carcassCode ? ` · carcaça ${item.carcassCode}` : ""}</span></td>
             <td className="px-3 py-2.5 font-bold">{item.planCode}</td>
             <td className="px-3 py-2.5 font-mono font-bold text-slate-700">{item.orderNumber}</td>
             <td className="px-3 py-2.5 font-bold tabular-nums">{formatNumber(item.targetKg)} kg</td>

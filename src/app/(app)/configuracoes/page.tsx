@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowRight, Clock3, Factory, FileCog, Megaphone, Settings2, UserRound, UsersRound, Wrench, CircleStop, History, PackageOpen } from "lucide-react";
+import { ArrowRight, Boxes, Clock3, Factory, FileCog, Megaphone, Settings2, UserRound, UsersRound, Wrench, CircleStop, History, PackageOpen } from "lucide-react";
 import { PageHeading } from "@/components/page-heading";
 import { requireAdmin } from "@/lib/local-auth/server";
 
@@ -8,6 +8,7 @@ const registrationCards = [
   { title: "Fichas de processo", description: "Receitas, parâmetros técnicos e sequências das ferramentas.", href: "/engenharia", icon: FileCog },
   { title: "Ferramentas", description: "Matrizes físicas, vida útil e histórico importado.", href: "/ferramentas", icon: Wrench },
   { title: "Estoque de tarugos", description: "Barras físicas, lotes, reservas e disponibilidade por liga.", href: "/configuracoes/tarugos", icon: PackageOpen },
+  { title: "Recursos das prensas", description: "Carcaças individuais, disponibilidade e vínculo por prensa.", href: "/configuracoes/recursos-prensa", icon: Boxes },
   { title: "Turnos e produção", description: "Horários, produtividade padrão e premissas da simulação.", href: "/configuracoes/producao", icon: Clock3 },
   { title: "Paradas e motivos", description: "Catálogo de ocorrências para Produção e Manutenção.", href: "/configuracoes/paradas", icon: CircleStop },
   { title: "Auditoria e conciliação", description: "Histórico imutável de setups, ações e confronto com os apontamentos da empresa.", href: "/configuracoes/auditoria", icon: History },
