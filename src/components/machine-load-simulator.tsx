@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Boxes, CalendarClock, Clock3, Flame, FolderOpen, Gauge, GripVertical, Loader2, PackageOpen, RefreshCw, Route, Save, Settings2, ShieldCheck, TriangleAlert, X } from "lucide-react";
+import { Boxes, CalendarClock, CheckCircle2, Clock3, Columns3, Flame, FolderOpen, Gauge, GitCompareArrows, GripVertical, Loader2, PackageOpen, RefreshCw, Route, Save, Settings2, ShieldCheck, TriangleAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { simulateMachineLoad, type LoadOrderInput, type MachineLoadSettings, type ProductivitySource, type ResourceUnavailabilityInput, type WorkShiftInput } from "@/modules/planning/machine-load-simulator";
 import { SIMULATION_MODEL_VERSION } from "@/modules/planning/simulation";
+import { analyzePlanning, defaultIntelligenceWeights, type IntelligenceWeights, type PlanningAnalysis } from "@/modules/planning/planning-intelligence";
 import { useCurrentUser } from "@/components/current-user-provider";
 
 interface RawOrder {
@@ -16,20 +17,26 @@ interface RawOrder {
 }
 interface RawSheet { tool_code: string; machine_code: string | null; parameters: Record<string, unknown> | null; }
 interface RawTool { code: string; matrix_code: string | null; productivity_kg_h: string | null; holes: number | null; bo: string | null; }
-interface RawSetting { machine_code: string; billet_bar_weight_kg: number | string; extrusion_efficiency: number | string; default_productivity_kg_h: number | string; setup_minutes: number; alloy_change_minutes: number; tool_heating_minutes: number; }
+interface RawSetting { machine_code: string; billet_bar_weight_kg: number | string; extrusion_efficiency: number | string; default_productivity_kg_h: number | string; setup_minutes: number; alloy_change_minutes: number; tool_heating_minutes: number; oven_count: number; oven_slots_per_oven: number; }
 interface RawShift { id: string; code: string; name: string; start_time: string; end_time: string; break_minutes: number; machine_codes: string[]; is_active: boolean; }
 interface ProductionSettingsPayload { settings: RawSetting[]; shifts: RawShift[]; }
 interface RawCycleOrder { production_order_id: string; tool_heating_cycles: { status: string; expected_ready_at: string | null; released_at: string | null } | null; }
 interface RawAlloy { tool_code: string; alloy_code: string; is_primary: boolean; }
 interface BilletStockSummary { alloyCode: string; lotCount: number; totalBars: number; reservedBars: number; availableBars: number; totalWeightKg: number | string; availableWeightKg: number | string; }
 interface BilletStockPayload { summary: BilletStockSummary[]; }
-interface CarcassResource { id: string; machineCode: string; sharedAcrossMachines?: boolean; carcassCode: string; totalQuantity: number; unavailableQuantity: number; reservedQuantity: number; availableQuantity: number; status: "available" | "maintenance" | "blocked" | "inactive"; location: string | null; }
+interface CarcassReservation { id: string; quantity: number; startsAt: string; endsAt: string; productionOrderId?: string | null; }
+interface CarcassResource { id: string; machineCode: string; sharedAcrossMachines?: boolean; carcassCode: string; totalQuantity: number; unavailableQuantity: number; physicalAvailableQuantity?: number; reservedQuantity: number; availableQuantity: number; reservations?: CarcassReservation[]; status: "available" | "maintenance" | "blocked" | "inactive"; location: string | null; }
+interface CarcassMapping { id: string; toolCode: string; machineCode: string | null; sequenceNumber: number | null; carcassCode: string; quantity: number; isActive: boolean; }
+interface CarcassMappingPayload { mappings: CarcassMapping[]; }
 interface RawUnavailability { id: string; resourceType: ResourceUnavailabilityInput["resourceType"]; resourceCode: string; startsAt: string; endsAt: string; reason: string; status: ResourceUnavailabilityInput["status"]; }
 interface ScenarioSummary { id: string; name: string; description: string | null; status: string; currentVersion: number; requestedStartAt: string | null; createdAt: string; updatedAt: string; createdBy: string | null; }
-interface LoadedScenario { scenarioId: string; name: string; description: string | null; versionNumber: number; mode: "fifo" | "optimized" | "manual"; requestedStartAt: string; inputs?: { selectedMachine?: string }; rules?: { unavailability?: ResourceUnavailabilityInput[]; billetStock?: { capturedAt?: string; summary?: BilletStockSummary[] }; carcassResources?: { capturedAt?: string; items?: CarcassResource[] } }; result: ReturnType<typeof simulateMachineLoad>; createdAt: string; }
+interface LoadedScenario { scenarioId: string; name: string; description: string | null; status: string; versionNumber: number; mode: "fifo" | "optimized" | "manual"; requestedStartAt: string; inputs?: { selectedMachine?: string }; rules?: { unavailability?: ResourceUnavailabilityInput[]; billetStock?: { capturedAt?: string; summary?: BilletStockSummary[] }; carcassResources?: { capturedAt?: string; items?: CarcassResource[] } }; result: ReturnType<typeof simulateMachineLoad>; analysis?: PlanningAnalysis | null; createdAt: string; }
 interface ProjectedBilletBalance { beforeKg: number; consumedKg: number; afterKg: number; initialKg: number; barWeightKg: number; remainingBarEquivalent: number; isFinalForAlloy: boolean; }
+interface LearningGroup { tool_code: string; machine_code: string; tool_sequence: number | null; sample_count: number; average_actual_productivity_kg_h: number | null; average_predicted_productivity_kg_h: number | null; mean_absolute_error_percent: number | null; confidence_percent: number; latest_actual_productivity_kg_h: number | null; calibrated: boolean; }
+interface LearningObservation { id: string; machine_code: string; tool_code: string; tool_sequence: number | null; predicted_productivity_kg_h: number | null; actual_productivity_kg_h: number | null; productivity_error_percent: number | null; predicted_duration_minutes: number | null; actual_duration_minutes: number | null; observed_at: string; }
+interface IntelligencePayload { settings: IntelligenceWeights; summary: { observations: number; predictionsCompared: number; meanAbsoluteErrorPercent: number; confidencePercent: number }; groups: LearningGroup[]; recent: LearningObservation[]; }
 
-const defaultSettings: MachineLoadSettings = { billetBarWeightKg: 415, extrusionEfficiency: 0.85, defaultProductivityKgH: 1000, setupMinutes: 20, alloyChangeMinutes: 15, toolHeatingMinutes: 240, ovenSlots: 21 };
+const defaultSettings: MachineLoadSettings = { billetBarWeightKg: 415, extrusionEfficiency: 0.85, defaultProductivityKgH: 1000, setupMinutes: 20, alloyChangeMinutes: 15, toolHeatingMinutes: 240, ovenCount: 3, ovenSlotsPerOven: 7, ovenSlots: 21 };
 const numberValue = (value: unknown) => typeof value === "number" ? value : Number(String(value ?? "").replace(/\./g, "").replace(",", ".")) || 0;
 const textValue = (...values: unknown[]) => values.map((value) => typeof value === "string" || typeof value === "number" ? String(value).trim() : "").find(Boolean) ?? "";
 const formatNumber = (value: number, digits = 1) => value.toLocaleString("pt-BR", { minimumFractionDigits: digits, maximumFractionDigits: digits });
@@ -38,7 +45,7 @@ const formatDateTime = (date: Date | null) => date ? date.toLocaleString("pt-BR"
 const machineLabel = (code: string) => code === "18" ? "Prensa 1.8" : code === "19" ? "Prensa 1.9" : `Prensa ${code}`;
 const toInputDateTime = (date: Date) => { const pad = (value: number) => String(value).padStart(2, "0"); return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`; };
 const parseInputDateTime = (value: string) => { const [datePart, timePart] = value.split("T"); if (!datePart || !timePart) return null; const [year, month, day] = datePart.split("-").map(Number); const [hours, minutes] = timePart.split(":").map(Number); const date = new Date(year, month - 1, day, hours, minutes); return Number.isNaN(date.getTime()) ? null : date; };
-const sourceLabel: Record<ProductivitySource, string> = { simplificada: "Ult. Prod.", ficha: "Ficha", ferramenta: "Histórico", padrao: "Padrão" };
+const sourceLabel: Record<ProductivitySource, string> = { simplificada: "Ult. Prod.", aprendizado: "Aprendizado", ficha: "Ficha", ferramenta: "Histórico", padrao: "Padrão" };
 
 function hydrateSimulation(value: unknown) {
   return JSON.parse(JSON.stringify(value), (key, item) => key.endsWith("At") && typeof item === "string" ? new Date(item) : item) as ReturnType<typeof simulateMachineLoad>;
@@ -71,7 +78,7 @@ export function MachineLoadSimulator() {
   const [mode, setMode] = useState<"fifo" | "optimized" | "manual">("optimized");
   const [manualOrder, setManualOrder] = useState<Record<string, string[]>>({});
   const [machine, setMachine] = useState("all");
-  const [tab, setTab] = useState<"timeline" | "billets">("timeline");
+  const [tab, setTab] = useState<"timeline" | "gantt" | "billets">("gantt");
   const [startedAt, setStartedAt] = useState<Date | null>(null);
   const [startInput, setStartInput] = useState("");
   const [scenarioPanel, setScenarioPanel] = useState<"save" | "list" | null>(null);
@@ -83,6 +90,9 @@ export function MachineLoadSimulator() {
   const [scenarioError, setScenarioError] = useState("");
   const [scenarioNotice, setScenarioNotice] = useState("");
   const [historicalScenario, setHistoricalScenario] = useState<LoadedScenario | null>(null);
+  const [comparePanel, setComparePanel] = useState(false);
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [intelligence, setIntelligence] = useState<IntelligencePayload>({ settings: defaultIntelligenceWeights, summary: { observations: 0, predictionsCompared: 0, meanAbsoluteErrorPercent: 0, confidencePercent: 0 }, groups: [], recent: [] });
 
   const load = useCallback(async function load() {
     setLoading(true); setError("");
@@ -91,7 +101,7 @@ export function MachineLoadSimulator() {
       const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
       if (!organizationId) throw new Error("Organização padrão não configurada.");
       const supabase = createClient();
-      const [ordersResult, sheetsResult, toolsResult, cyclesResult, alloysResult, productionSettingsResponse, billetStockResponse, carcassResponse, calendarResponse] = await Promise.all([
+      const [ordersResult, sheetsResult, toolsResult, cyclesResult, alloysResult, productionSettingsResponse, billetStockResponse, carcassResponse, calendarResponse, mappingResponse, intelligenceResponse] = await Promise.all([
         supabase.from("production_orders").select("id,order_number,plan_code,machine_code,tool_code,alloy_code,target_kg,produced_kg,sequence,due_date,status,last_productivity_kg_h,holes,bo_code,carcass_code,source_data").eq("organization_id", organizationId).eq("is_active", true).in("status", ["planned", "released", "in_progress", "paused"]).order("machine_code").order("sequence"),
         supabase.from("process_sheets").select("tool_code,machine_code,parameters").eq("organization_id", organizationId).eq("is_active", true),
         supabase.from("tools").select("code,matrix_code,productivity_kg_h,holes,bo").eq("organization_id", organizationId),
@@ -101,6 +111,8 @@ export function MachineLoadSimulator() {
         fetch("/api/billet-stock", { cache: "no-store" }),
         fetch("/api/press-resources", { cache: "no-store" }),
         fetch("/api/resource-calendar", { cache: "no-store" }),
+        fetch("/api/tool-carcass-mappings", { cache: "no-store" }),
+        fetch("/api/planning-intelligence", { cache: "no-store" }),
       ]);
       const firstError = [ordersResult.error, sheetsResult.error, toolsResult.error, cyclesResult.error, alloysResult.error].find(Boolean);
       if (firstError) throw firstError;
@@ -112,6 +124,9 @@ export function MachineLoadSimulator() {
       const carcassPayload = await carcassResponse.json().catch(() => null) as CarcassResource[] | null;
       setCarcassResources(carcassResponse.ok && Array.isArray(carcassPayload) ? carcassPayload : []);
       setCarcassResourcesAvailable(carcassResponse.ok);
+      const mappingPayload = await mappingResponse.json().catch(() => null) as CarcassMappingPayload | null;
+      const intelligencePayload = await intelligenceResponse.json().catch(() => null) as IntelligencePayload | null;
+      if (intelligenceResponse.ok && intelligencePayload?.settings) setIntelligence(intelligencePayload);
       const calendarPayload = await calendarResponse.json().catch(() => null) as RawUnavailability[] | null;
       setUnavailability(calendarResponse.ok && Array.isArray(calendarPayload) ? calendarPayload.map((period) => ({ ...period, startsAt: new Date(period.startsAt), endsAt: new Date(period.endsAt) })) : []);
       const rawOrders = (ordersResult.data ?? []) as RawOrder[];
@@ -123,7 +138,7 @@ export function MachineLoadSimulator() {
       const settingMap: Record<string, MachineLoadSettings> = {};
       for (const code of [...new Set(rawOrders.map((order) => order.machine_code))]) {
         const row = rawSettings.find((item) => item.machine_code === code);
-        settingMap[code] = row ? { billetBarWeightKg: numberValue(row.billet_bar_weight_kg), extrusionEfficiency: numberValue(row.extrusion_efficiency), defaultProductivityKgH: numberValue(row.default_productivity_kg_h), setupMinutes: row.setup_minutes, alloyChangeMinutes: row.alloy_change_minutes, toolHeatingMinutes: row.tool_heating_minutes, ovenSlots: 21 } : { ...defaultSettings };
+        settingMap[code] = row ? { billetBarWeightKg: numberValue(row.billet_bar_weight_kg), extrusionEfficiency: numberValue(row.extrusion_efficiency), defaultProductivityKgH: numberValue(row.default_productivity_kg_h), setupMinutes: row.setup_minutes, alloyChangeMinutes: row.alloy_change_minutes, toolHeatingMinutes: row.tool_heating_minutes, ovenCount: Math.max(numberValue(row.oven_count) || 3, 1), ovenSlotsPerOven: Math.max(numberValue(row.oven_slots_per_oven) || 7, 1), ovenSlots: Math.max(numberValue(row.oven_count) || 3, 1) * Math.max(numberValue(row.oven_slots_per_oven) || 7, 1) } : { ...defaultSettings };
       }
       const input = rawOrders.map((order) => {
         const sheet = rawSheets.find((item) => item.tool_code.toUpperCase() === order.tool_code.toUpperCase() && (!item.machine_code || item.machine_code === order.machine_code));
@@ -131,12 +146,17 @@ export function MachineLoadSimulator() {
         const sheetExtrusion = nestedRecord(sheet?.parameters ?? null, "extrusion");
         const sheetBillet = nestedRecord(sheet?.parameters ?? null, "billet");
         const sourceData = order.source_data ?? {};
-        const sources: Array<[number, ProductivitySource]> = [[numberValue(order.last_productivity_kg_h), "simplificada"], [readSheetProductivity(sheet?.parameters ?? null), "ficha"], [numberValue(tool?.productivity_kg_h), "ferramenta"], [settingMap[order.machine_code]?.defaultProductivityKgH ?? 1000, "padrao"]];
+        const learned = intelligencePayload?.groups
+          .filter((item) => item.calibrated && item.tool_code.toUpperCase() === order.tool_code.toUpperCase() && item.machine_code === order.machine_code && (!item.tool_sequence || item.tool_sequence === order.sequence))
+          .sort((left, right) => Number(right.tool_sequence === order.sequence) - Number(left.tool_sequence === order.sequence))[0];
+        const sources: Array<[number, ProductivitySource]> = [[numberValue(learned?.average_actual_productivity_kg_h), "aprendizado"], [numberValue(order.last_productivity_kg_h), "simplificada"], [readSheetProductivity(sheet?.parameters ?? null), "ficha"], [numberValue(tool?.productivity_kg_h), "ferramenta"], [settingMap[order.machine_code]?.defaultProductivityKgH ?? 1000, "padrao"]];
         const productivity = sources.find(([value]) => value > 0) ?? [1000, "padrao" as const];
         const cycle = rawCycles.find((item) => item.production_order_id === order.id)?.tool_heating_cycles;
         const toolHeatingState = cycle?.status === "released" ? "released" : cycle?.status === "heating" ? "heating" : "waiting";
         const toolReadyAt = cycle?.status === "released" ? new Date() : cycle?.expected_ready_at ? new Date(cycle.expected_ready_at) : null;
-        return { id: order.id, orderNumber: order.order_number, planCode: order.plan_code ?? "—", machineCode: order.machine_code, toolCode: order.tool_code, alloyCode: order.alloy_code ?? "SEM LIGA", alternativeAlloys: rawAlloys.filter((item) => item.tool_code.toUpperCase() === order.tool_code.toUpperCase() && !item.is_primary).map((item) => item.alloy_code), targetKg: numberValue(order.target_kg), producedKg: numberValue(order.produced_kg), sequence: order.sequence ?? 9999, dueDate: order.due_date, status: order.status, productivityKgH: productivity[0] as number, productivitySource: productivity[1] as ProductivitySource, toolReadyAt, toolHeatingState, holes: numberValue(order.holes) || numberValue(sourceData.furos) || numberValue(sheetExtrusion.holes) || tool?.holes || null, boCode: textValue(order.bo_code, sourceData.bo, tool?.bo) || null, carcassCode: textValue(order.carcass_code, sourceData.carcaca, sourceData.carcassCode, sheetBillet.casing) || null } satisfies LoadOrderInput;
+        const matchingMappings = (mappingPayload?.mappings ?? []).filter((item) => item.isActive && item.toolCode.toUpperCase() === order.tool_code.toUpperCase() && (!item.machineCode || item.machineCode === order.machine_code) && (!item.sequenceNumber || item.sequenceNumber === order.sequence));
+        const mapping = matchingMappings.sort((left, right) => Number(right.sequenceNumber === order.sequence) - Number(left.sequenceNumber === order.sequence) || Number(!!right.machineCode) - Number(!!left.machineCode))[0];
+        return { id: order.id, orderNumber: order.order_number, planCode: order.plan_code ?? "—", machineCode: order.machine_code, toolCode: order.tool_code, alloyCode: order.alloy_code ?? "SEM LIGA", alternativeAlloys: rawAlloys.filter((item) => item.tool_code.toUpperCase() === order.tool_code.toUpperCase() && !item.is_primary).map((item) => item.alloy_code), targetKg: numberValue(order.target_kg), producedKg: numberValue(order.produced_kg), sequence: order.sequence ?? 9999, dueDate: order.due_date, status: order.status, productivityKgH: productivity[0] as number, productivitySource: productivity[1] as ProductivitySource, toolReadyAt, toolHeatingState, holes: numberValue(order.holes) || numberValue(sourceData.furos) || numberValue(sheetExtrusion.holes) || tool?.holes || null, boCode: textValue(order.bo_code, sourceData.bo, tool?.bo) || null, carcassCode: textValue(order.carcass_code, sourceData.carcaca, sourceData.carcassCode, sheetBillet.casing, mapping?.carcassCode) || null, carcassQuantity: mapping?.quantity ?? 1 } satisfies LoadOrderInput;
       });
       setOrders(input); setSettings(settingMap);
       setShifts((productionSettings.shifts ?? []).map((shift) => ({ id: shift.id, code: shift.code, name: shift.name, startTime: shift.start_time.slice(0, 5), endTime: shift.end_time.slice(0, 5), breakMinutes: shift.break_minutes, machineCodes: shift.machine_codes ?? [], isActive: shift.is_active })));
@@ -167,9 +187,10 @@ export function MachineLoadSimulator() {
   const machineOptions = [...new Set(orders.map((order) => order.machineCode).filter((code) => !allowedMachines || allowedMachines.has(code)))].sort();
   const simulationState = useMemo(() => {
     if (!startedAt) return { simulation: null, problem: "" };
-    try { return { simulation: simulateMachineLoad(orderedVisibleOrders, settings, startedAt, mode === "manual" ? "fifo" : mode, shifts, unavailability), problem: "" }; }
+    try { return { simulation: simulateMachineLoad(orderedVisibleOrders, settings, startedAt, mode === "manual" ? "fifo" : mode, shifts, unavailability, { carcasses: carcassResources.map((item) => ({ code: item.carcassCode, capacity: item.status === "available" ? Math.max(item.physicalAvailableQuantity ?? item.totalQuantity - item.unavailableQuantity, 0) : 0, reservations: (item.reservations ?? []).map((reservation) => ({ ...reservation, startsAt: reservation.startsAt ? new Date(reservation.startsAt) : null, endsAt: reservation.endsAt ? new Date(reservation.endsAt) : null })) })) }), problem: "" }; }
     catch (cause) { return { simulation: null, problem: cause instanceof Error ? cause.message : "Não foi possível aplicar os turnos." }; }
-  }, [orderedVisibleOrders, settings, startedAt, mode, shifts, unavailability]);
+  }, [orderedVisibleOrders, settings, startedAt, mode, shifts, unavailability, carcassResources]);
+  const currentAnalysis = useMemo(() => simulationState.simulation ? analyzePlanning(simulationState.simulation, billetStock.map((item) => ({ alloyCode: item.alloyCode, availableBars: item.availableBars, availableWeightKg: numberValue(item.availableWeightKg) })), intelligence.settings) : null, [simulationState.simulation, billetStock, intelligence.settings]);
 
   async function openScenarioList() {
     setScenarioBusy(true); setScenarioError(""); setScenarioPanel("list");
@@ -214,6 +235,7 @@ export function MachineLoadSimulator() {
           inputSnapshot: { selectedMachine: machine, manualOrder, orders: orderedVisibleOrders },
           rulesSnapshot: { modelVersion: SIMULATION_MODEL_VERSION, settingsByMachine: settings, shifts, unavailability, billetStock: { capturedAt: new Date().toISOString(), summary: billetStock }, carcassResources: { capturedAt: new Date().toISOString(), items: carcassResources } },
           resultSnapshot: simulationState.simulation,
+          analysisSnapshot: currentAnalysis ?? {},
         }),
       });
       const payload = await response.json().catch(() => null) as { id?: string; versionNumber?: number; error?: string } | null;
@@ -223,6 +245,27 @@ export function MachineLoadSimulator() {
       setScenarioPanel(null);
     } catch (cause) { setScenarioError(cause instanceof Error ? cause.message : "Não foi possível salvar o cenário."); }
     finally { setScenarioBusy(false); }
+  }
+
+  async function approveAndApplyScenario() {
+    if (!historicalScenario || historicalScenario.status === "approved") return;
+    setApprovalBusy(true); setScenarioError(""); setScenarioNotice("");
+    try {
+      const response = await fetch("/api/simulation-scenarios", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operation: "approve-and-apply", scenarioId: historicalScenario.scenarioId }) });
+      const payload = await response.json().catch(() => null) as { error?: string } | null;
+      if (!response.ok) throw new Error(payload?.error || "Não foi possível aprovar o cenário.");
+      setHistoricalScenario({ ...historicalScenario, status: "approved" });
+      setScenarioNotice("Cenário aprovado e aplicado. A sequência e as reservas foram registradas na auditoria.");
+    } catch (cause) { setScenarioError(cause instanceof Error ? cause.message : "Não foi possível aprovar o cenário."); }
+    finally { setApprovalBusy(false); }
+  }
+
+  async function saveIntelligenceWeights(weights: IntelligenceWeights) {
+    const response = await fetch("/api/planning-intelligence", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(weights) });
+    const payload = await response.json().catch(() => null) as { error?: string } | null;
+    if (!response.ok) throw new Error(payload?.error || "Não foi possível salvar os critérios.");
+    setIntelligence((current) => ({ ...current, settings: weights }));
+    setScenarioNotice("Critérios da nota atualizados e registrados na auditoria.");
   }
 
   if (loading) return <div className="grid min-h-72 place-items-center rounded-2xl border bg-white"><Loader2 className="size-7 animate-spin text-orange-500" /></div>;
@@ -236,6 +279,7 @@ export function MachineLoadSimulator() {
   const displayedCarcassResources = historicalScenario ? historicalScenario.rules?.carcassResources?.items ?? [] : carcassResources;
   const hasCarcassSnapshot = historicalScenario ? !!historicalScenario.rules?.carcassResources : carcassResourcesAvailable;
   const displayedUnavailability = historicalScenario ? historicalScenario.rules?.unavailability ?? [] : unavailability;
+  const planningAnalysis = historicalScenario?.analysis ?? (historicalScenario ? analyzePlanning(simulation, displayedBilletStock.map((item) => ({ alloyCode: item.alloyCode, availableBars: item.availableBars, availableWeightKg: numberValue(item.availableWeightKg) })), intelligence.settings) : currentAnalysis);
   const estimatedEnd = simulation.machines.reduce<Date | null>((latest, item) => !item.endsAt ? latest : !latest || item.endsAt > latest ? item.endsAt : latest, null);
   function activateManualMode() {
     if (mode !== "manual") {
@@ -274,9 +318,11 @@ export function MachineLoadSimulator() {
   return <div className="space-y-4">
     {historicalScenario ? <section className="flex flex-wrap items-center gap-3 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950">
       <FolderOpen className="size-5 text-blue-600" />
-      <div className="min-w-0 flex-1"><strong className="block truncate">Histórico: {historicalScenario.name} · versão {historicalScenario.versionNumber}</strong><span className="text-xs text-blue-700">Cenário congelado em {formatDateTime(new Date(historicalScenario.createdAt))}. Os dados abaixo não serão recalculados.</span></div>
+      <div className="min-w-0 flex-1"><strong className="block truncate">Histórico: {historicalScenario.name} · versão {historicalScenario.versionNumber}</strong><span className="text-xs text-blue-700">Cenário congelado em {formatDateTime(new Date(historicalScenario.createdAt))}. Status: {historicalScenario.status === "approved" ? "aprovado e aplicado" : "calculado, aguardando aprovação"}.</span></div>
+      {canPlan && historicalScenario.status !== "approved" ? <Button size="sm" disabled={approvalBusy || !simulation.feasible} onClick={() => void approveAndApplyScenario()}>{approvalBusy ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}Aprovar e aplicar</Button> : null}
       <Button size="sm" variant="outline" onClick={returnToCurrentSimulation}>Voltar à simulação atual</Button>
     </section> : null}
+    {scenarioError && !scenarioPanel ? <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700"><TriangleAlert className="size-4" />{scenarioError}</div> : null}
     {scenarioNotice ? <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800"><span>{scenarioNotice}</span><button type="button" aria-label="Fechar aviso" onClick={() => setScenarioNotice("")}><X className="size-4" /></button></div> : null}
     <section className="flex flex-wrap items-center gap-2 rounded-2xl border bg-white p-3 shadow-sm">
       <select disabled={!!historicalScenario} value={machine} onChange={(event) => setMachine(event.target.value)} className="h-10 rounded-xl border bg-white px-3 text-sm font-semibold disabled:bg-slate-100"><option value="all">{allowedMachines ? "Minhas prensas" : "Todas as prensas"}</option>{machineOptions.map((code) => <option key={code} value={code}>{machineLabel(code)}</option>)}</select>
@@ -285,6 +331,7 @@ export function MachineLoadSimulator() {
       <span className="ml-auto text-xs text-slate-500">Base: {formatDateTime(startedAt)}</span>
       <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-bold text-emerald-700">{shifts.filter((shift) => shift.isActive).map((shift) => `${shift.code} ${shift.startTime}–${shift.endTime}`).join(" · ")}</span>
       <Button variant="outline" size="sm" onClick={() => void openScenarioList()}><FolderOpen className="size-4" />Cenários</Button>
+      <Button variant="outline" size="sm" onClick={() => setComparePanel(true)}><GitCompareArrows className="size-4" />Comparar</Button>
       {canPlan && !historicalScenario ? <Button size="sm" onClick={openSavePanel}><Save className="size-4" />Salvar cenário</Button> : null}
       <Button variant="outline" size="sm" disabled={!!historicalScenario} onClick={load}><RefreshCw className="size-4" />Atualizar</Button>
     </section>
@@ -296,18 +343,22 @@ export function MachineLoadSimulator() {
       <Metric icon={PackageOpen} label="Barras a preparar" value={`${simulation.totalBars}`} tone="violet" />
       <Metric icon={Route} label="Itens na sequência" value={`${simulation.machines.reduce((sum, item) => sum + item.items.length, 0)}`} tone="green" />
     </section>
+    {planningAnalysis ? <PlanningIntelligencePanel analysis={planningAnalysis} weights={intelligence.settings} canEdit={canPlan && !historicalScenario} onSave={saveIntelligenceWeights} /> : null}
+    <PlanningLearningPanel data={intelligence} />
     <ThermalCoveragePanel machines={simulation.machines} />
+    <ConstraintPanel simulation={simulation} />
     <AlloyWarnings machines={simulation.machines} />
     <BilletStockWarnings billets={simulation.billets} stock={displayedBilletStock} available={hasBilletStockSnapshot} />
     <PressResourceWarnings machines={simulation.machines} resources={displayedCarcassResources} available={hasCarcassSnapshot} />
     <OperationalCalendarPanel periods={displayedUnavailability} machines={simulation.machines.map((item) => item.machineCode)} />
 
     <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
-      <div className="flex items-center justify-between border-b px-4 py-3"><div><h2 className="font-heading font-bold text-slate-900">Simulação operacional</h2><p className="text-xs text-slate-500">Prensa + ferramenta/forno + tarugo/liga.</p></div><div className="flex rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setTab("timeline")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "timeline" ? "bg-white shadow-sm" : "text-slate-500"}`}><Clock3 className="mr-1 inline size-3.5" />Linha do tempo</button><button type="button" onClick={() => setTab("billets")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "billets" ? "bg-white shadow-sm" : "text-slate-500"}`}><PackageOpen className="mr-1 inline size-3.5" />Carga de tarugo</button></div></div>
-      {tab === "timeline" ? <Timeline machines={simulation.machines} projectedBalances={projectedBilletBalances(simulation)} manual={!historicalScenario && mode === "manual"} onMove={moveManualOrder} /> : <BilletTable billets={simulation.billets} settings={settings} stock={displayedBilletStock} available={hasBilletStockSnapshot} />}
+      <div className="flex flex-col gap-3 border-b px-4 py-3 lg:flex-row lg:items-center lg:justify-between"><div><h2 className="font-heading font-bold text-slate-900">Simulação operacional</h2><p className="text-xs text-slate-500">Prensa + ferramenta/forno + carcaça + tarugo/liga.</p></div><div className="flex rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setTab("gantt")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "gantt" ? "bg-white shadow-sm" : "text-slate-500"}`}><Columns3 className="mr-1 inline size-3.5" />Gantt</button><button type="button" onClick={() => setTab("timeline")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "timeline" ? "bg-white shadow-sm" : "text-slate-500"}`}><Clock3 className="mr-1 inline size-3.5" />Tabela</button><button type="button" onClick={() => setTab("billets")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "billets" ? "bg-white shadow-sm" : "text-slate-500"}`}><PackageOpen className="mr-1 inline size-3.5" />Tarugo</button></div></div>
+      {tab === "gantt" ? <GanttChart machines={simulation.machines} /> : tab === "timeline" ? <Timeline machines={simulation.machines} projectedBalances={projectedBilletBalances(simulation)} manual={!historicalScenario && mode === "manual"} onMove={moveManualOrder} /> : <BilletTable billets={simulation.billets} settings={settings} stock={displayedBilletStock} available={hasBilletStockSnapshot} />}
     </section>
-    <div className="flex items-start gap-2 rounded-xl bg-blue-50 px-4 py-3 text-xs text-blue-800"><Settings2 className="mt-0.5 size-4 shrink-0" /><p><strong>Premissas atuais:</strong> peso e eficiência seguem a configuração de cada prensa; os fornos usam 21 vagas por prensa e a regra térmica cadastrada. A carga necessária agora é comparada ao estoque físico livre, já descontadas as reservas ativas.</p></div>
+    <div className="flex items-start gap-2 rounded-xl bg-blue-50 px-4 py-3 text-xs text-blue-800"><Settings2 className="mt-0.5 size-4 shrink-0" /><p><strong>Premissas atuais:</strong> peso, eficiência, tempo térmico e quantidade de vagas seguem a configuração de cada prensa. Ferramentas e carcaças compartilhadas são protegidas contra uso simultâneo; a aprovação só ocorre com estoque físico suficiente.</p></div>
     {scenarioPanel ? <ScenarioDialog mode={scenarioPanel} name={scenarioName} description={scenarioDescription} scenarios={scenarios} busy={scenarioBusy} error={scenarioError} scenarioId={scenarioId} onName={setScenarioName} onDescription={setScenarioDescription} onClose={() => { setScenarioPanel(null); setScenarioError(""); }} onSave={() => void saveScenario()} onOpen={(id) => void openSavedScenario(id)} /> : null}
+    {comparePanel ? <ScenarioComparisonDialog onClose={() => setComparePanel(false)} /> : null}
   </div>;
 }
 
@@ -350,6 +401,95 @@ function ScenarioDialog({ mode, name, description, scenarios, busy, error, scena
       <footer className="flex justify-end gap-2 border-t bg-slate-50 px-5 py-3"><Button variant="outline" onClick={onClose}>Cancelar</Button>{mode === "save" ? <Button disabled={busy || !name.trim()} onClick={onSave}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}{scenarioId ? "Salvar nova versão" : "Salvar cenário"}</Button> : null}</footer>
     </section>
   </div>;
+}
+
+function ScenarioComparisonDialog({ onClose }: { onClose: () => void }) {
+  const [items, setItems] = useState<ScenarioSummary[]>([]);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [loaded, setLoaded] = useState<LoadedScenario[]>([]);
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const response = await fetch("/api/simulation-scenarios", { cache: "no-store" });
+        const payload = await response.json().catch(() => null) as ScenarioSummary[] | { error?: string } | null;
+        if (!response.ok || !Array.isArray(payload)) throw new Error(!Array.isArray(payload) && payload?.error ? payload.error : "Não foi possível carregar os cenários.");
+        if (active) setItems(payload);
+      } catch (cause) { if (active) setError(cause instanceof Error ? cause.message : "Não foi possível carregar os cenários."); }
+      finally { if (active) setBusy(false); }
+    })();
+    return () => { active = false; };
+  }, []);
+  async function compare() {
+    if (selected.length !== 2) return;
+    setBusy(true); setError("");
+    try {
+      const results = await Promise.all(selected.map(async (id) => {
+        const response = await fetch(`/api/simulation-scenarios?id=${encodeURIComponent(id)}`, { cache: "no-store" });
+        const payload = await response.json().catch(() => null) as (Omit<LoadedScenario, "result"> & { result: unknown }) | { error?: string } | null;
+        if (!response.ok || !payload || !("result" in payload)) throw new Error(payload && "error" in payload ? payload.error : "Não foi possível abrir um dos cenários.");
+        return { ...payload, result: hydrateSimulation(payload.result) } as LoadedScenario;
+      }));
+      setLoaded(results);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Não foi possível comparar os cenários."); }
+    finally { setBusy(false); }
+  }
+  const metrics = loaded.map((scenario) => ({
+    scenario,
+    totalHours: scenario.result.machines.reduce((sum, machine) => sum + machine.simulatedMinutes, 0) / 60,
+    waitingHours: scenario.result.machines.reduce((sum, machine) => sum + machine.waitingMinutes, 0) / 60,
+    endAt: scenario.result.machines.reduce<Date | null>((latest, machine) => !machine.endsAt ? latest : !latest || machine.endsAt > latest ? machine.endsAt : latest, null),
+    bars: scenario.result.totalBars,
+    conflicts: scenario.result.conflicts?.length ?? 0,
+  }));
+  return <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 p-4" role="dialog" aria-modal="true"><section className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border bg-white shadow-2xl"><header className="flex items-start gap-3 border-b px-5 py-4"><span className="grid size-10 place-items-center rounded-xl bg-blue-50 text-blue-600"><GitCompareArrows className="size-5" /></span><div className="flex-1"><h2 className="font-heading text-lg font-black">Comparar cenários</h2><p className="text-xs text-slate-500">Selecione duas versões para avaliar prazo, espera, material e conflitos antes da aprovação.</p></div><button type="button" aria-label="Fechar" onClick={onClose}><X className="size-5" /></button></header><div className="overflow-y-auto p-5">
+    {error ? <div className="mb-4 rounded-xl bg-red-50 p-3 text-sm font-semibold text-red-700">{error}</div> : null}
+    {!loaded.length ? busy ? <div className="grid min-h-48 place-items-center"><Loader2 className="size-7 animate-spin text-orange-500" /></div> : <div className="grid gap-2 md:grid-cols-2">{items.map((item) => { const active = selected.includes(item.id); return <button type="button" key={item.id} onClick={() => setSelected((current) => active ? current.filter((id) => id !== item.id) : current.length < 2 ? [...current, item.id] : [current[1], item.id])} className={`rounded-xl border p-4 text-left ${active ? "border-orange-400 bg-orange-50 ring-2 ring-orange-100" : "hover:border-slate-300"}`}><div className="flex items-center justify-between gap-2"><strong>{item.name}</strong><span className="rounded-full bg-white px-2 py-1 text-[10px] font-black">v{item.currentVersion}</span></div><p className="mt-1 text-xs text-slate-500">{formatDateTime(item.requestedStartAt ? new Date(item.requestedStartAt) : null)} · {item.status}</p></button>; })}</div> : <div className="grid gap-4 lg:grid-cols-2">{metrics.map((metric, index) => <article key={metric.scenario.scenarioId} className={`overflow-hidden rounded-2xl border ${index === 0 ? "border-blue-200" : "border-orange-200"}`}><header className={`p-4 ${index === 0 ? "bg-blue-50" : "bg-orange-50"}`}><p className="text-[10px] font-black uppercase tracking-wide text-slate-500">Cenário {index + 1}</p><h3 className="font-heading text-lg font-black">{metric.scenario.name}</h3><p className="text-xs text-slate-500">versão {metric.scenario.versionNumber} · {metric.scenario.status}</p></header><div className="grid grid-cols-2 gap-px bg-slate-200"><CompareMetric label="Término" value={formatDateTime(metric.endAt)} /><CompareMetric label="Tempo total" value={`${formatNumber(metric.totalHours, 1)} h`} /><CompareMetric label="Espera/setup" value={`${formatNumber(metric.waitingHours, 1)} h`} /><CompareMetric label="Barras" value={String(metric.bars)} /><CompareMetric label="Conflitos" value={String(metric.conflicts)} /><CompareMetric label="Viabilidade" value={metric.scenario.result.feasible === false ? "Bloqueado" : "Viável"} /></div></article>)}</div>}
+  </div><footer className="flex items-center justify-between border-t bg-slate-50 px-5 py-3"><Button variant="ghost" onClick={() => { setLoaded([]); setSelected([]); }} disabled={!loaded.length}>Nova comparação</Button><div className="flex gap-2"><Button variant="outline" onClick={onClose}>Fechar</Button>{!loaded.length ? <Button disabled={selected.length !== 2 || busy} onClick={() => void compare()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <GitCompareArrows className="size-4" />}Comparar selecionados</Button> : null}</div></footer></section></div>;
+}
+
+function CompareMetric({ label, value }: { label: string; value: string }) { return <div className="bg-white p-4"><p className="text-[9px] font-black uppercase tracking-wide text-slate-400">{label}</p><p className="mt-1 font-black text-slate-900">{value}</p></div>; }
+
+function ConstraintPanel({ simulation }: { simulation: ReturnType<typeof simulateMachineLoad> }) {
+  const blocking = simulation.conflicts?.filter((item) => item.severity === "blocking") ?? [];
+  const delayed = simulation.conflicts?.filter((item) => item.severity === "warning" && item.delayMinutes > 0) ?? [];
+  if (!blocking.length && !delayed.length) return <div className="flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"><ShieldCheck className="size-5" /><div><strong className="block">Recursos compatíveis</strong><span className="text-xs">Ferramentas e carcaças não apresentam sobreposição na sequência calculada.</span></div></div>;
+  return <section className={`rounded-2xl border px-4 py-3 ${blocking.length ? "border-red-200 bg-red-50 text-red-900" : "border-amber-200 bg-amber-50 text-amber-900"}`}><div className="flex items-start gap-3"><TriangleAlert className="mt-0.5 size-5 shrink-0" /><div><strong className="block">{blocking.length ? `${blocking.length} impedimento(s) para aprovação` : `${delayed.length} espera(s) de recurso incorporada(s)`}</strong><div className="mt-1 space-y-1 text-xs">{[...blocking, ...delayed].slice(0, 6).map((item) => <p key={item.id}>{item.message}{item.delayMinutes > 0 ? ` A simulação aguardou ${formatDuration(item.delayMinutes)}.` : ""}</p>)}</div>{blocking.length ? <a href="/configuracoes/recursos-prensa" className="mt-2 inline-flex rounded-lg bg-red-700 px-3 py-1.5 text-xs font-bold text-white">Completar cadastros</a> : null}</div></div></section>;
+}
+
+function PlanningIntelligencePanel({ analysis, weights, canEdit, onSave }: { analysis: PlanningAnalysis; weights: IntelligenceWeights; canEdit: boolean; onSave: (weights: IntelligenceWeights) => Promise<void> }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(weights);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const total = draft.thermal + draft.resources + draft.material + draft.delivery + draft.flow;
+  const tone = analysis.score.overall >= 85 ? "emerald" : analysis.score.overall >= 70 ? "blue" : analysis.score.overall >= 50 ? "amber" : "red";
+  const toneClasses = { emerald: "border-emerald-200 bg-emerald-50 text-emerald-800", blue: "border-blue-200 bg-blue-50 text-blue-800", amber: "border-amber-200 bg-amber-50 text-amber-900", red: "border-red-200 bg-red-50 text-red-900" }[tone];
+  async function save() { setBusy(true); setError(""); try { await onSave(draft); setEditing(false); } catch (cause) { setError(cause instanceof Error ? cause.message : "Não foi possível salvar os critérios."); } finally { setBusy(false); } }
+  return <section className="overflow-hidden rounded-2xl border bg-white shadow-sm"><header className="flex flex-col gap-3 border-b px-5 py-4 lg:flex-row lg:items-center"><div className={`grid size-16 shrink-0 place-items-center rounded-2xl border ${toneClasses}`}><div className="text-center"><strong className="block text-2xl leading-none">{analysis.score.overall}</strong><span className="text-[9px] font-black uppercase">de 100</span></div></div><div className="flex-1"><p className="text-[10px] font-black uppercase tracking-[0.16em] text-orange-600">Inteligência explicável</p><h2 className="font-heading text-xl font-black">Sequência {analysis.score.label.toLowerCase()}</h2><p className="text-sm text-slate-500">{analysis.summary.conflicts} conflito(s), {analysis.summary.opportunities} oportunidade(s) e {analysis.summary.predictedIdleMinutes} min de parada/espera previstos.</p></div>{canEdit ? <Button variant="outline" size="sm" onClick={() => { setDraft(weights); setEditing(true); }}><Settings2 className="size-4" />Ajustar critérios</Button> : null}</header><div className="grid gap-4 p-5 xl:grid-cols-[1fr_1.25fr]"><div><h3 className="mb-3 text-xs font-black uppercase tracking-wide text-slate-500">Composição da nota</h3><div className="space-y-2">{analysis.score.criteria.map((criterion) => <div key={criterion.key} className="rounded-xl border p-3"><div className="flex items-center gap-3"><span className={`grid size-9 place-items-center rounded-lg text-sm font-black ${criterion.score >= 80 ? "bg-emerald-50 text-emerald-700" : criterion.score >= 50 ? "bg-amber-50 text-amber-700" : "bg-red-50 text-red-700"}`}>{Math.round(criterion.score)}</span><div className="min-w-0 flex-1"><div className="flex justify-between gap-2"><strong className="text-sm">{criterion.label}</strong><span className="text-[10px] font-bold text-slate-400">peso {criterion.weight}%</span></div><p className="mt-0.5 text-xs text-slate-500">{criterion.explanation}</p></div></div></div>)}</div></div><div><h3 className="mb-3 text-xs font-black uppercase tracking-wide text-slate-500">Recomendações priorizadas</h3>{analysis.recommendations.length ? <div className="space-y-2">{analysis.recommendations.slice(0, 8).map((item) => <article key={item.id} className={`rounded-xl border p-3 ${item.priority === "critical" ? "border-red-200 bg-red-50/60" : item.priority === "high" ? "border-amber-200 bg-amber-50/60" : item.priority === "opportunity" ? "border-emerald-200 bg-emerald-50/60" : "bg-slate-50"}`}><div className="flex items-start gap-3"><span className={`mt-0.5 rounded-full px-2 py-1 text-[9px] font-black uppercase ${item.priority === "critical" ? "bg-red-600 text-white" : item.priority === "high" ? "bg-amber-500 text-white" : item.priority === "opportunity" ? "bg-emerald-600 text-white" : "bg-slate-600 text-white"}`}>{item.priority === "critical" ? "Crítica" : item.priority === "high" ? "Alta" : item.priority === "opportunity" ? "Oportunidade" : "Melhoria"}</span><div><strong className="text-sm">{item.title}</strong><p className="mt-1 text-xs text-slate-600"><b>Por quê:</b> {item.reason}</p><p className="mt-1 text-xs text-slate-600"><b>Impacto:</b> {item.impact}</p><p className="mt-1 text-xs font-semibold text-slate-800"><b>Ação:</b> {item.action}</p></div></div></article>)}</div> : <div className="grid min-h-36 place-items-center rounded-xl border border-emerald-200 bg-emerald-50 text-center text-sm text-emerald-800"><div><ShieldCheck className="mx-auto mb-2 size-6" /><strong>Sem ação prioritária</strong><p className="text-xs">A sequência atende aos critérios configurados.</p></div></div>}</div></div>
+    {editing ? <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 p-4"><section className="w-full max-w-2xl overflow-hidden rounded-2xl border bg-white shadow-2xl"><header className="flex items-start border-b px-5 py-4"><div className="flex-1"><h2 className="font-heading text-lg font-black">Critérios da nota AluPilot</h2><p className="text-xs text-slate-500">Distribua 100 pontos conforme a prioridade da operação.</p></div><button type="button" onClick={() => setEditing(false)}><X className="size-5" /></button></header><div className="grid gap-4 p-5 sm:grid-cols-2"><WeightField label="Cobertura térmica" value={draft.thermal} onChange={(value) => setDraft({ ...draft, thermal: value })} /><WeightField label="Recursos físicos" value={draft.resources} onChange={(value) => setDraft({ ...draft, resources: value })} /><WeightField label="Material" value={draft.material} onChange={(value) => setDraft({ ...draft, material: value })} /><WeightField label="Prazo" value={draft.delivery} onChange={(value) => setDraft({ ...draft, delivery: value })} /><WeightField label="Fluidez" value={draft.flow} onChange={(value) => setDraft({ ...draft, flow: value })} /><WeightField label="Amostras para calibrar" value={draft.minimumConfidenceSamples} onChange={(value) => setDraft({ ...draft, minimumConfidenceSamples: value })} max={100} /><div className={`rounded-xl border p-3 text-sm font-bold sm:col-span-2 ${total === 100 ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-red-200 bg-red-50 text-red-700"}`}>Soma dos pesos: {total}% {total === 100 ? "· configuração válida" : "· ajuste para exatamente 100%"}</div>{error ? <p className="rounded-xl bg-red-50 p-3 text-sm text-red-700 sm:col-span-2">{error}</p> : null}</div><footer className="flex justify-end gap-2 border-t bg-slate-50 px-5 py-3"><Button variant="outline" onClick={() => setEditing(false)}>Cancelar</Button><Button disabled={busy || total !== 100} onClick={() => void save()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}Salvar critérios</Button></footer></section></div> : null}
+  </section>;
+}
+
+function WeightField({ label, value, onChange, max = 100 }: { label: string; value: number; onChange: (value: number) => void; max?: number }) { return <label className="text-sm font-bold">{label}<div className="mt-1 flex h-11 items-center rounded-xl border bg-white px-3"><input type="number" min="0" max={max} step="1" value={value} onChange={(event) => onChange(Number(event.target.value))} className="w-full outline-none" /><span className="text-xs font-bold text-slate-400">{label === "Amostras para calibrar" ? "execuções" : "%"}</span></div></label>; }
+
+function PlanningLearningPanel({ data }: { data: IntelligencePayload }) {
+  const [expanded, setExpanded] = useState(false);
+  return <section className="overflow-hidden rounded-2xl border bg-white shadow-sm"><button type="button" onClick={() => setExpanded((value) => !value)} className="flex w-full items-center gap-3 px-5 py-4 text-left"><span className="grid size-10 place-items-center rounded-xl bg-violet-50 text-violet-600"><Gauge className="size-5" /></span><div className="flex-1"><p className="text-[10px] font-black uppercase tracking-wide text-violet-600">Aprendizado operacional</p><h2 className="font-heading font-black">{data.summary.observations} execução(ões) aprendidas · confiança {formatNumber(data.summary.confidencePercent, 0)}%</h2><p className="text-xs text-slate-500">{data.summary.predictionsCompared} comparação(ões) previsão × realizado · erro médio {formatNumber(data.summary.meanAbsoluteErrorPercent, 1)}%</p></div><span className="text-xs font-bold text-slate-500">{expanded ? "Recolher" : "Ver calibração"}</span></button>{expanded ? <div className="border-t"><div className="grid gap-3 p-5 sm:grid-cols-3"><LearningMetric label="Base de aprendizado" value={`${data.summary.observations} execuções`} /><LearningMetric label="Previsões comparadas" value={`${data.summary.predictionsCompared}`} /><LearningMetric label="Erro absoluto médio" value={`${formatNumber(data.summary.meanAbsoluteErrorPercent, 1)}%`} /></div><div className="overflow-x-auto"><table className="w-full min-w-[800px] text-sm"><thead className="bg-slate-50 text-left text-[10px] uppercase text-slate-500"><tr><th className="px-5 py-3">Ferramenta / setup</th><th>Prensa</th><th>Amostras</th><th>Prod. realizada média</th><th>Erro médio</th><th>Confiança</th><th>Status</th></tr></thead><tbody>{data.groups.slice(0, 12).map((group) => <tr key={`${group.tool_code}-${group.machine_code}-${group.tool_sequence ?? "all"}`} className="border-t"><td className="px-5 py-3"><strong className="font-mono text-orange-600">{group.tool_code}</strong><span className="block text-xs text-slate-400">seq. {group.tool_sequence ?? "geral"}</span></td><td>{machineLabel(group.machine_code)}</td><td>{group.sample_count}</td><td className="font-bold">{group.average_actual_productivity_kg_h ? `${formatNumber(group.average_actual_productivity_kg_h, 0)} kg/h` : "—"}</td><td>{group.mean_absolute_error_percent == null ? "Aguardando previsão" : `${formatNumber(group.mean_absolute_error_percent, 1)}%`}</td><td><div className="h-2 w-24 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-violet-500" style={{ width: `${Math.min(group.confidence_percent, 100)}%` }} /></div><span className="text-[10px] text-slate-500">{formatNumber(group.confidence_percent, 0)}%</span></td><td><span className={`rounded-full px-2 py-1 text-[10px] font-black uppercase ${group.calibrated ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{group.calibrated ? "Calibrado" : "Coletando"}</span></td></tr>)}</tbody></table>{!data.groups.length ? <div className="grid h-32 place-items-center text-sm text-slate-400">Conclua produções para iniciar o aprendizado.</div> : null}</div></div> : null}</section>;
+}
+
+function LearningMetric({ label, value }: { label: string; value: string }) { return <div className="rounded-xl bg-slate-50 p-4"><p className="text-[9px] font-black uppercase text-slate-400">{label}</p><p className="mt-1 text-lg font-black text-slate-900">{value}</p></div>; }
+
+function GanttChart({ machines }: { machines: ReturnType<typeof simulateMachineLoad>["machines"] }) {
+  const allItems = machines.flatMap((machine) => machine.items);
+  const start = allItems.reduce<Date | null>((earliest, item) => !earliest || item.startAt < earliest ? item.startAt : earliest, null);
+  const end = allItems.reduce<Date | null>((latest, item) => !latest || item.endAt > latest ? item.endAt : latest, null);
+  if (!start || !end) return <div className="grid h-52 place-items-center text-sm text-slate-400">Sem itens para exibir.</div>;
+  const span = Math.max(end.getTime() - start.getTime(), 1);
+  const ticks = Array.from({ length: 7 }, (_, index) => new Date(start.getTime() + span * (index / 6)));
+  return <div className="overflow-x-auto p-4"><div className="min-w-[980px]"><div className="ml-32 grid grid-cols-7 border-b pb-2 text-[10px] font-bold text-slate-400">{ticks.map((tick) => <span key={tick.toISOString()}>{tick.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>)}</div><div className="space-y-5 py-4">{machines.map((machine) => <div key={machine.machineCode} className="grid grid-cols-[7rem_1fr] gap-4"><div><strong className="font-heading text-sm">{machineLabel(machine.machineCode)}</strong><p className="text-[10px] text-slate-400">{machine.items.length} itens</p></div><div className="relative min-h-16 rounded-xl bg-slate-100" style={{ backgroundImage: "linear-gradient(to right, rgb(226 232 240) 1px, transparent 1px)", backgroundSize: "16.666% 100%" }}>{machine.items.map((item, index) => { const left = ((item.startAt.getTime() - start.getTime()) / span) * 100; const width = Math.max(((item.endAt.getTime() - item.startAt.getTime()) / span) * 100, 0.8); const blocked = item.resourceConflicts?.some((conflict) => conflict.severity === "blocking"); const delayed = item.resourceWaitMinutes > 0.5; return <div key={item.id} title={`${item.toolCode} · ${formatDateTime(item.startAt)} → ${formatDateTime(item.endAt)}${delayed ? ` · espera ${formatDuration(item.resourceWaitMinutes)}` : ""}`} className={`absolute flex h-10 items-center overflow-hidden rounded-lg border px-2 text-[10px] font-black shadow-sm ${blocked ? "border-red-300 bg-red-100 text-red-800" : delayed ? "border-amber-300 bg-amber-100 text-amber-900" : index % 2 ? "border-blue-300 bg-blue-100 text-blue-800" : "border-orange-300 bg-orange-100 text-orange-800"}`} style={{ left: `${left}%`, width: `${width}%`, top: `${8 + (index % 2) * 22}px`, zIndex: index + 1 }}><span className="truncate">{item.toolCode}</span></div>; })}</div></div>)}</div><div className="ml-32 flex flex-wrap gap-4 border-t pt-3 text-[10px] font-bold text-slate-500"><span><i className="mr-1 inline-block size-2 rounded-full bg-orange-300" />Produção programada</span><span><i className="mr-1 inline-block size-2 rounded-full bg-amber-300" />Atrasada por recurso</span><span><i className="mr-1 inline-block size-2 rounded-full bg-red-300" />Cadastro bloqueante</span></div></div></div>;
 }
 
 function ThermalCoveragePanel({ machines }: { machines: ReturnType<typeof simulateMachineLoad>["machines"] }) {

@@ -25,6 +25,8 @@ const settingSchema = z.object({
   setupMinutes: z.number().int().min(0).max(1_440),
   alloyChangeMinutes: z.number().int().min(0).max(1_440),
   toolHeatingMinutes: z.number().int().min(0).max(1_440),
+  ovenCount: z.number().int().min(1).max(20),
+  ovenSlotsPerOven: z.number().int().min(1).max(100),
 });
 const schema = z.discriminatedUnion("operation", [shiftSchema, settingSchema]);
 
@@ -61,6 +63,7 @@ export async function POST(request: Request) {
         p_extrusion_efficiency: value.extrusionEfficiencyPct / 100,
         p_setup_minutes: value.setupMinutes, p_alloy_change_minutes: value.alloyChangeMinutes,
         p_tool_heating_minutes: value.toolHeatingMinutes,
+        p_oven_count: value.ovenCount, p_oven_slots_per_oven: value.ovenSlotsPerOven,
       });
   if (result.error) return NextResponse.json({ error: result.error.message }, { status: 400 });
   return NextResponse.json({ ok: true, id: result.data ?? null });

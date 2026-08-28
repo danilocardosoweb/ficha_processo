@@ -26,10 +26,11 @@ Este documento é o registro vivo da evolução do sistema. Ele existe para pres
 | Produção | Implementada | Assistente, início/conclusão e cálculo de tarugos. |
 | Fornos | Implementada | 3 fornos × 7 posições por prensa, aquecimento e liberação. |
 | Paradas | Implementada | Catálogos, turnos, abertura e encerramento. |
-| Carga Máquina | Parcial | Simulação determinística com cenários e versionamento persistidos no Supabase; o otimizador explicável ainda será evoluído. |
+| Carga Máquina | Implementada — V2 | Simulação determinística, restrições de recursos, Gantt, comparação, cenários versionados e aprovação controlada. |
 | Estoque físico de tarugos | Implementado | Cadastro por liga/lote, reservas e confronto com a carga estão persistidos no Supabase. |
-| Carcaças como recurso | Implementado | Cadastro por prensa, disponibilidade, reservas futuras e alertas no simulador estão persistidos no Supabase. |
-| Otimização explicável | Não existe | A sequência sugerida usa heurísticas fixas. |
+| Carcaças como recurso | Implementado | Estoque compartilhado, vínculo ferramenta–carcaça, capacidade física, reservas futuras e alertas no simulador. |
+| Otimização explicável | Implementada — primeira versão | Nota ponderada, critérios visíveis e recomendações com motivo, impacto e ação sugerida. |
+| Aprendizado operacional | Implementado — calibração inicial | Previsto × realizado por ferramenta, prensa e sequência, com confiança mínima configurável. |
 
 ## Recursos do simulador
 
@@ -62,38 +63,70 @@ Interface
 
 ## Roadmap
 
-### Etapa 1 — Fundação segura
+### Etapa 1 — Fundação segura — concluída
 
 - registrar cenários e versões imutáveis;
 - guardar snapshots das entradas, regras e resultados;
 - incorporar Furos e BO ao contrato do simulador;
 - preservar integralmente o comportamento atual.
 
-### Etapa 2 — Recursos reais
+### Etapa 2 — Recursos reais — concluída
 
 - estoque e reservas de tarugos;
 - carcaças e disponibilidade;
 - calendários por prensa, forno e manutenção;
 - validação de capacidade por recurso.
 
-### Etapa 3 — Simulador V2
+### Etapa 3 — Simulador V2 — concluída
 
 - sequência candidata com pontuação;
 - restrições duras e preferências separadas;
 - explicação de cada decisão;
 - comparação lado a lado entre cenários.
 
-### Etapa 4 — Aprendizado operacional
+### Etapa 4 — Aprendizado operacional — concluída na primeira versão
 
 - previsto × realizado por item e setup;
 - calibração de produtividade, eficiência e tempos;
 - indicadores de confiabilidade da previsão.
 
-### Etapa 5 — Copiloto de planejamento
+### Etapa 5 — Copiloto de planejamento — concluída na primeira versão
 
 - sugestões com evidências e nível de confiança;
 - aprovação humana e trilha de auditoria;
 - preparação para integrações de estoque, ERP e CLP.
+
+## Regras implantadas no Simulador V2
+
+- prensa respeita turno, paradas e indisponibilidades cadastradas;
+- ferramenta não pode ocupar duas prensas ao mesmo tempo;
+- carcaça é um estoque compartilhado entre as prensas e sua capacidade é verificada por intervalo;
+- o vínculo ferramenta–carcaça pode ser geral ou específico por prensa e sequência;
+- fornos usam topologia configurável (`quantidade de fornos × vagas por forno`) e a regra térmica cadastrada;
+- a aprovação é bloqueada quando há falta de material, carcaça ausente/sem capacidade ou outro conflito impeditivo;
+- ao aprovar, o sistema reserva tarugos, carcaças, prensa, ferramenta e vaga do forno, aplica a fila e registra auditoria;
+- cenários calculados permanecem imutáveis e podem ser comparados antes da decisão;
+- Furos e BO permanecem rastreáveis e visíveis, mas ainda não alteram matematicamente a duração sem validação da Engenharia.
+
+## Inteligência explicável e aprendizado
+
+- a nota do cenário varia de 0 a 100 e combina cobertura térmica, recursos físicos, material, prazo e fluxo;
+- os pesos são configuráveis e precisam totalizar 100%;
+- toda recomendação informa por que foi criada, impacto esperado e ação possível;
+- a produção realizada gera automaticamente uma observação de aprendizado com produtividade e duração previstas × realizadas;
+- a calibração é agrupada por ferramenta, prensa e sequência;
+- uma produtividade aprendida só é usada quando atinge o número mínimo configurado de amostras; até lá, a receita continua sendo a fonte segura;
+- a aprovação humana continua obrigatória: a inteligência recomenda, mas não libera produção sozinha.
+
+## Pendências operacionais de dados
+
+Estas não são falhas de implementação. São cadastros físicos que precisam refletir a fábrica antes de uma aprovação real:
+
+1. completar os vínculos ferramenta–carcaça das ferramentas que ainda aparecem sem carcaça;
+2. conferir quantidade total e indisponível de cada carcaça compartilhada;
+3. validar peso por barra e eficiência de cada prensa/liga;
+4. confirmar a topologia real dos fornos e suas vagas;
+5. acumular histórico realizado suficiente para elevar a confiança das calibrações.
 
 ## Registro de mudanças
 
@@ -134,3 +167,18 @@ Interface
 - a linha do tempo passou a separar quantidade líquida do pedido e necessidade bruta de tarugo, calculada sobre o saldo líquido pela eficiência configurada da prensa;
 - o antigo saldo isolado por ferramenta foi substituído visualmente por uma trilha de saldo projetado por liga: carga inicial calculada, consumo bruto cronológico, equivalência em barras e saldo final destacado;
 - o cálculo do saldo projetado cruza os horários das duas prensas para representar a ordem real prevista de consumo da mesma liga.
+
+### 2026-08-28 — Simulador V2, explicabilidade e aprendizado
+
+- criado o cadastro auditável de vínculos ferramenta–carcaça, incluindo exceções por prensa e sequência;
+- a capacidade dos fornos passou a ser configurável por quantidade de fornos e vagas, preservando 3 × 7 como padrão atual;
+- o motor passou a detectar e acomodar conflitos globais de ferramenta e carcaça entre as prensas;
+- criada a visualização Gantt da programação e o painel de restrições por recurso;
+- criada a comparação lado a lado de duas versões salvas;
+- criada a aprovação controlada de cenário, com validação impeditiva, aplicação da fila e reservas atômicas de tarugo e carcaça;
+- a trilha de recursos aprovada passou a registrar prensa, ferramenta, carcaça e vaga de forno;
+- criada a nota explicável de 0 a 100, com pesos configuráveis e recomendações priorizadas;
+- criado o aprendizado previsto × realizado e a calibração por ferramenta, prensa e sequência;
+- o banco já contém duas observações históricas iniciais; o uso automático da produtividade aprendida respeita o mínimo configurado de amostras;
+- funções internas de gatilho tiveram execução direta removida de usuários anônimos e autenticados;
+- migrations aplicadas diretamente ao Supabase do projeto; nenhuma atualização foi enviada ao GitHub.

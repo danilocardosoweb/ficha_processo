@@ -13,6 +13,11 @@ const saveSchema = z.object({
   inputSnapshot: z.record(z.string(), z.unknown()),
   rulesSnapshot: z.record(z.string(), z.unknown()),
   resultSnapshot: z.record(z.string(), z.unknown()),
+  analysisSnapshot: z.record(z.string(), z.unknown()).default({}),
+});
+const approveSchema = z.object({
+  scenarioId: z.string().uuid(),
+  operation: z.literal("approve-and-apply"),
 });
 
 async function context() {
@@ -56,7 +61,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: parsed.error.issues[0]?.message || "Revise os dados do cenário." }, { status: 400 });
   }
   const value = parsed.data;
-  const { data, error } = await ctx.supabase.rpc("local_save_simulation_scenario", {
+  const { data, error } = await ctx.supabase.rpc("local_save_simulation_scenario_v2", {
     p_token: ctx.token,
     p_scenario_id: value.scenarioId,
     p_name: value.name,
@@ -67,6 +72,20 @@ export async function POST(request: Request) {
     p_input_snapshot: value.inputSnapshot,
     p_rules_snapshot: value.rulesSnapshot,
     p_result_snapshot: value.resultSnapshot,
+    p_analysis_snapshot: value.analysisSnapshot,
+  });
+  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+  return NextResponse.json(data ?? { ok: true });
+}
+
+export async function PATCH(request: Request) {
+  const ctx = await context();
+  if (!ctx) return NextResponse.json({ error: "Sessão encerrada." }, { status: 401 });
+  const parsed = approveSchema.safeParse(await request.json().catch(() => null));
+  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message || "Cenário inválido." }, { status: 400 });
+  const { data, error } = await ctx.supabase.rpc("local_approve_simulation_scenario_v2", {
+    p_token: ctx.token,
+    p_scenario_id: parsed.data.scenarioId,
   });
   if (error) return NextResponse.json({ error: error.message }, { status: 400 });
   return NextResponse.json(data ?? { ok: true });
