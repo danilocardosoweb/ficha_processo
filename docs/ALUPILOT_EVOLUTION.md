@@ -26,9 +26,9 @@ Este documento é o registro vivo da evolução do sistema. Ele existe para pres
 | Produção | Implementada | Assistente, início/conclusão e cálculo de tarugos. |
 | Fornos | Implementada | 3 fornos × 7 posições por prensa, aquecimento e liberação. |
 | Paradas | Implementada | Catálogos, turnos, abertura e encerramento. |
-| Carga Máquina | Parcial | Simulação determinística com interface de cenários e versionamento preparada; a persistência depende da aplicação da migration no Supabase. |
-| Estoque físico de tarugos | Preparado localmente | Cadastro por liga/lote, reservas e confronto com a carga foram implementados; a persistência depende da aplicação da migration no Supabase. |
-| Carcaças como recurso | Preparado localmente | Cadastro por prensa, disponibilidade, reservas futuras e alertas no simulador; depende da migration no Supabase. |
+| Carga Máquina | Parcial | Simulação determinística com cenários e versionamento persistidos no Supabase; o otimizador explicável ainda será evoluído. |
+| Estoque físico de tarugos | Implementado | Cadastro por liga/lote, reservas e confronto com a carga estão persistidos no Supabase. |
+| Carcaças como recurso | Implementado | Cadastro por prensa, disponibilidade, reservas futuras e alertas no simulador estão persistidos no Supabase. |
 | Otimização explicável | Não existe | A sequência sugerida usa heurísticas fixas. |
 
 ## Recursos do simulador
@@ -122,3 +122,5 @@ Interface
 - migrations AluPilot aplicadas ao projeto Supabase `Supervisorio Prensa` em 28/08/2026: cenários, estoque de tarugos, recursos das prensas e calendário operacional;
 - verificação pós-aplicação confirmou nove tabelas com RLS ativo, onze RPCs disponíveis e histórico das quatro migrations registrado no Supabase;
 - diagnósticos de segurança e desempenho executados; os avisos de RLS sem policy são esperados neste modelo, pois as tabelas permanecem sem acesso direto e as operações usam RPCs validadas por token local.
+- corrigidas seis funções AluPilot que consultavam `full_name`; o modelo local de usuários utiliza `display_name` como fonte única do nome do operador;
+- correção aplicada no Supabase e validada sem criar coluna duplicada ou alterar os usuários existentes.
