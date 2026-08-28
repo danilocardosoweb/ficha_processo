@@ -33,6 +33,7 @@ export interface PlanningRecommendation {
   action: string;
   orderId?: string;
   machineCode?: string;
+  toolCode?: string;
 }
 
 export interface PlanningAnalysis {
@@ -69,7 +70,10 @@ export function analyzePlanning(simulation: LoadSimulation, stock: MaterialAvail
   const overall = Math.round(criteria.reduce((sum, criterion) => sum + criterion.score * criterion.weight, 0) / weightTotal);
   const recommendations: PlanningRecommendation[] = [];
 
-  for (const conflict of blocking) recommendations.push({ id: `resource-${conflict.id}`, priority: "critical", category: "resource", title: `Resolver ${conflict.resourceCode}`, reason: conflict.message, impact: "Cenário não pode ser aprovado enquanto o recurso estiver incompleto.", action: conflict.type === "missing-carcass" ? "Cadastrar o vínculo ferramenta–carcaça e informar o saldo físico." : "Liberar, reparar ou cadastrar capacidade adicional.", orderId: conflict.orderId, machineCode: conflict.machineCode });
+  for (const conflict of blocking) {
+    const affectedItem = items.find((item) => item.id === conflict.orderId);
+    recommendations.push({ id: `resource-${conflict.id}`, priority: "critical", category: "resource", title: `Resolver ${conflict.resourceCode}`, reason: conflict.message, impact: "Cenário não pode ser aprovado enquanto o recurso estiver incompleto.", action: conflict.type === "missing-carcass" ? "Cadastrar o vínculo ferramenta–carcaça e informar o saldo físico." : "Liberar, reparar ou cadastrar capacidade adicional.", orderId: conflict.orderId, machineCode: conflict.machineCode, toolCode: affectedItem?.toolCode });
+  }
   for (const machine of simulation.machines.filter((item) => item.thermalCoverage.status === "risk")) recommendations.push({ id: `thermal-${machine.machineCode}`, priority: "high", category: "thermal", title: `Proteger a cobertura térmica da prensa ${machine.machineCode}`, reason: `${Math.round(machine.thermalCoverage.predictedIdleMinutes)} min de parada térmica previstos a partir de ${machine.thermalCoverage.firstRiskToolCode ?? "uma próxima ferramenta"}.`, impact: `Recuperar até ${Math.round(machine.thermalCoverage.predictedIdleMinutes)} min de disponibilidade da prensa.`, action: "Antecipar o aquecimento indicado ou posicionar uma ordem de maior duração antes do primeiro risco.", machineCode: machine.machineCode });
   for (const shortage of shortages) { const available = stockByAlloy.get(normalized(shortage.alloyCode))?.availableBars ?? 0; recommendations.push({ id: `material-${shortage.alloyCode}`, priority: "critical", category: "material", title: `Cobrir ${shortage.alloyCode}`, reason: `Necessárias ${shortage.bars} barras e disponíveis ${available}.`, impact: `Faltam ${shortage.bars - available} barra(s) para executar a programação.`, action: "Programar recebimento, reduzir/redistribuir a carga ou substituir por liga alternativa homologada." }); }
   for (const billet of simulation.billets.filter((item) => item.endingBalanceKg > 0)) {

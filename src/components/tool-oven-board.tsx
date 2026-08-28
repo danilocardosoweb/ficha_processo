@@ -81,6 +81,23 @@ function duration(ms: number) {
   const seconds = total % 60;
   return `${hours ? `${hours}h ` : ""}${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
 }
+
+function readyEscalation(cycle: Pick<HeatingCycle, "entered_at" | "expected_ready_at">, now: number) {
+  const enteredAt = new Date(cycle.entered_at).getTime();
+  const readyAt = new Date(cycle.expected_ready_at).getTime();
+  const readyForMs = Math.max(0, now - readyAt);
+  const elapsedHours = Math.max(0, (now - enteredAt) / 3_600_000);
+  const level = Math.min(4, Math.max(0, Math.floor((elapsedHours - 4) / 1)));
+  return { level, readyForMs };
+}
+
+const readyCardTone = [
+  "border-red-200 bg-red-50",
+  "border-red-300 bg-red-100",
+  "border-red-400 bg-red-200",
+  "border-red-500 bg-red-300",
+  "border-red-700 bg-red-500 text-white",
+] as const;
 function orderDemand(order: HeatingOrder) {
   if (order.demand_unit === "kg") return `${Number(order.target_kg || 0).toLocaleString("pt-BR")} kg`;
   return `${Number(order.target_quantity || 0).toLocaleString("pt-BR")} ${order.demand_unit === "bars" ? "barras" : "peças"}`;
@@ -353,11 +370,11 @@ export function ToolOvenBoard() {
 function OvenMap({ ovens, heating, released, now, onRelease, onRelocate }: { ovens: ToolOven[]; heating: HeatingCycle[]; released: HeatingCycle[]; now: number; onRelease: (cycle: HeatingCycle) => void; onRelocate: (cycle: HeatingCycle) => void }) {
   const cycles = [...heating, ...released];
   return <section className="rounded-2xl border bg-white p-3 shadow-sm">
-    <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h2 className="font-heading text-sm font-bold text-slate-900">Mapa do forno</h2><p className="text-[11px] text-slate-500">Visão rápida das vagas ocupadas e livres. Selecione uma vaga ocupada para agir.</p></div><div className="flex items-center gap-3 text-[10px] font-semibold text-slate-500"><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-orange-500" />Aquecendo</span><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-emerald-500" />Liberada</span><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full border border-slate-300 bg-white" />Livre</span></div></div>
+    <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h2 className="font-heading text-sm font-bold text-slate-900">Mapa do forno</h2><p className="text-[11px] text-slate-500">As ferramentas prontas mudam do vermelho claro ao escuro entre 4 h e 8 h de permanência.</p></div><div className="flex flex-wrap items-center gap-3 text-[10px] font-semibold text-slate-500"><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-orange-500" />Aquecendo</span><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-red-300" />Pronta</span><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-red-700" />Pronta há mais tempo</span><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-emerald-500" />Liberada</span><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full border border-slate-300 bg-white" />Livre</span></div></div>
     {ovens.length ? <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{ovens.map((oven) => {
       const ovenCycles = cycles.filter((cycle) => cycle.oven_id === oven.id);
       const byPosition = new Map(ovenCycles.map((cycle) => [cycle.oven_position, cycle]));
-      return <div key={oven.id} className="rounded-xl border bg-slate-50/70 p-2.5"><div className="mb-2 flex items-center justify-between"><div><p className="text-xs font-black text-slate-900">{oven.name}</p><p className="text-[10px] text-slate-500">Prensa {machineLabel(oven.machine_code)} · {ovenCycles.length}/{oven.position_count} ocupadas</p></div><span className="rounded-full bg-white px-2 py-1 text-[10px] font-bold text-slate-500">{oven.position_count - ovenCycles.length} livres</span></div><div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">{Array.from({ length: oven.position_count }, (_, index) => index + 1).map((position) => { const cycle = byPosition.get(position); if (!cycle) return <div key={position} className="flex min-h-16 flex-col justify-between rounded-lg border border-dashed border-slate-200 bg-white p-2"><span className="text-[9px] font-bold text-slate-400">Vaga {position}</span><span className="text-[10px] text-slate-400">Livre</span></div>; const isHeating = cycle.status === "heating"; const ready = isHeating && now >= new Date(cycle.expected_ready_at).getTime(); return <button key={position} type="button" onClick={() => isHeating ? onRelease(cycle) : onRelocate(cycle)} className={cn("min-h-16 rounded-lg border p-2 text-left transition hover:-translate-y-0.5 hover:shadow-sm", isHeating ? ready ? "border-emerald-200 bg-emerald-50" : "border-orange-200 bg-orange-50" : "border-emerald-200 bg-emerald-50/80")} title={isHeating ? "Abrir opções de liberação" : "Abrir opções da ferramenta liberada"}><div className="flex items-start justify-between gap-1"><span className="text-[9px] font-bold text-slate-500">Vaga {position}</span><span className={cn("size-2 rounded-full", isHeating ? ready ? "bg-emerald-500" : "bg-orange-500" : "bg-emerald-500")} /></div><p className="mt-1 truncate font-mono text-xs font-black text-slate-900">{cycle.tool_code}</p><p className="truncate text-[9px] text-slate-500">{isHeating ? ready ? "Pronta" : duration(new Date(cycle.expected_ready_at).getTime() - now) : "Liberada"}</p></button>; })}</div></div>;
+      return <div key={oven.id} className="rounded-xl border bg-slate-50/70 p-2.5"><div className="mb-2 flex items-center justify-between"><div><p className="text-xs font-black text-slate-900">{oven.name}</p><p className="text-[10px] text-slate-500">Prensa {machineLabel(oven.machine_code)} · {ovenCycles.length}/{oven.position_count} ocupadas</p></div><span className="rounded-full bg-white px-2 py-1 text-[10px] font-bold text-slate-500">{oven.position_count - ovenCycles.length} livres</span></div><div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">{Array.from({ length: oven.position_count }, (_, index) => index + 1).map((position) => { const cycle = byPosition.get(position); if (!cycle) return <div key={position} className="flex min-h-16 flex-col justify-between rounded-lg border border-dashed border-slate-200 bg-white p-2"><span className="text-[9px] font-bold text-slate-400">Vaga {position}</span><span className="text-[10px] text-slate-400">Livre</span></div>; const isHeating = cycle.status === "heating"; const ready = isHeating && now >= new Date(cycle.expected_ready_at).getTime(); const readyState = ready ? readyEscalation(cycle, now) : null; const darkReady = (readyState?.level ?? 0) >= 4; return <button key={position} type="button" onClick={() => isHeating ? onRelease(cycle) : onRelocate(cycle)} className={cn("min-h-[4.5rem] rounded-lg border p-2 text-left transition hover:-translate-y-0.5 hover:shadow-sm", isHeating ? ready && readyState ? readyCardTone[readyState.level] : "border-orange-200 bg-orange-50" : "border-emerald-200 bg-emerald-50/80")} title={isHeating ? "Abrir opções de liberação" : "Abrir opções da ferramenta liberada"}><div className="flex items-start justify-between gap-1"><span className={cn("text-[9px] font-bold", darkReady ? "text-red-50" : "text-slate-500")}>Vaga {position}</span><span className={cn("size-2 rounded-full", isHeating ? ready ? darkReady ? "bg-white" : "bg-red-600" : "bg-orange-500" : "bg-emerald-500")} /></div><p className={cn("mt-1 truncate font-mono text-xs font-black", darkReady ? "text-white" : "text-slate-900")}>{cycle.tool_code}</p><p className={cn("truncate text-[9px] font-semibold", darkReady ? "text-red-50" : ready ? "text-red-700" : "text-slate-500")}>{isHeating ? ready && readyState ? `Pronta · +${duration(readyState.readyForMs)}` : duration(new Date(cycle.expected_ready_at).getTime() - now) : "Liberada"}</p></button>; })}</div></div>;
     })}</div> : <Empty text="Nenhum forno cadastrado para esta prensa." />}
     <p className="mt-3 text-[10px] text-slate-400">Clique em uma vaga aquecendo para liberar/justificar, ou em uma vaga liberada para realocar a ferramenta.</p>
   </section>;
@@ -386,18 +403,20 @@ function HeatingCard({ cycle, now, saving, onRelease, onCancel, onRelocate }: { 
   const start = new Date(cycle.entered_at).getTime();
   const expired = now >= maximum;
   const ready = now >= end && !expired;
+  const readyState = ready ? readyEscalation(cycle, now) : null;
+  const darkReady = (readyState?.level ?? 0) >= 4;
   const nearMaximum = !expired && maximum - now <= 4 * 60 * 60 * 1000;
   const progress = Math.min(100, Math.max(0, ((now - start) / (end - start)) * 100));
   const orders = cycle.tool_heating_cycle_orders.map((link) => link.production_orders).filter(Boolean) as HeatingOrder[];
   return (
-    <article className={cn("@container rounded-xl border p-3", expired ? "border-red-300 bg-red-50" : ready ? "border-emerald-300 bg-emerald-50/50" : "border-orange-200 bg-orange-50/40")}>
+    <article className={cn("@container rounded-xl border p-3 transition-colors", expired ? "border-red-800 bg-red-600" : ready && readyState ? readyCardTone[readyState.level] : "border-orange-200 bg-orange-50/40")}>
       <div className="flex justify-between gap-3">
         <div>
-          <p className="font-mono text-lg font-black text-slate-950">{cycle.tool_code}</p>
-          <p className="text-xs text-slate-500">Prensa {machineLabel(cycle.machine_code)} · {cycle.oven_code || "Forno"} / posição {cycle.oven_position || "—"}</p>
-          <p className="mt-1 text-[11px] font-semibold text-slate-500">{cycle.tool_type === "tubular" ? "Tubular" : "Sólida"} · {cycle.target_temperature_c || "—"} °C</p>
+          <p className={cn("font-mono text-lg font-black", darkReady || expired ? "text-white" : "text-slate-950")}>{cycle.tool_code}</p>
+          <p className={cn("text-xs", darkReady || expired ? "text-red-50" : "text-slate-500")}>Prensa {machineLabel(cycle.machine_code)} · {cycle.oven_code || "Forno"} / posição {cycle.oven_position || "—"}</p>
+          <p className={cn("mt-1 text-[11px] font-semibold", darkReady || expired ? "text-red-50" : "text-slate-500")}>{cycle.tool_type === "tubular" ? "Tubular" : "Sólida"} · {cycle.target_temperature_c || "—"} °C</p>
         </div>
-        <span className={cn("h-fit rounded-full px-2 py-1 text-[10px] font-black uppercase", expired ? "bg-red-100 text-red-700" : ready ? "bg-emerald-100 text-emerald-700" : "bg-orange-100 text-orange-700")}>
+        <span className={cn("h-fit rounded-full px-2 py-1 text-[10px] font-black uppercase", expired ? "bg-white text-red-700" : ready ? darkReady ? "bg-white text-red-700" : "bg-red-600 text-white" : "bg-orange-100 text-orange-700")}>
           {expired ? "Limite excedido" : ready ? "Tempo atingido" : "Aquecendo"}
         </span>
       </div>

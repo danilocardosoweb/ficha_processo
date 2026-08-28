@@ -887,7 +887,7 @@ export function ProcessSheetsManager({
           if (!loadingTemplates) setCreationGuideOpen(open);
         }}
       >
-        <DialogContent className="max-h-[90dvh] max-w-3xl overflow-hidden p-0">
+        <DialogContent className="flex max-h-[92dvh] w-[calc(100vw-2rem)] flex-col overflow-hidden p-0 sm:max-w-5xl">
           <DialogHeader className="border-b px-6 py-5 text-left">
             <DialogTitle>Criar ficha de processo</DialogTitle>
             <DialogDescription>
@@ -896,32 +896,31 @@ export function ProcessSheetsManager({
               validado como ponto de partida.
             </DialogDescription>
           </DialogHeader>
-          <div className="grid min-h-0 gap-4 overflow-y-auto p-5 md:grid-cols-[0.8fr_1.2fr] md:p-6">
-            <div className="flex flex-col rounded-xl border border-orange-200 bg-orange-50/50 p-4">
-              <span className="mb-3 grid size-10 place-items-center rounded-lg bg-orange-100 text-orange-600">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5 md:p-6">
+            <section className="flex flex-col gap-4 rounded-2xl border border-orange-200 bg-orange-50/50 p-4 sm:flex-row sm:items-center">
+              <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-orange-100 text-orange-600">
                 <FilePlus2 className="size-5" />
               </span>
-              <h3 className="font-semibold text-slate-950">Começar em branco</h3>
-              <p className="mt-1 flex-1 text-sm leading-5 text-slate-600">
-                Crie a sequência 1 de {requestedToolCode} e informe todos os
-                parâmetros técnicos manualmente.
-              </p>
+              <div className="min-w-0 flex-1">
+                <h3 className="font-semibold text-slate-950">Começar em branco</h3>
+                <p className="mt-1 text-sm leading-5 text-slate-600">Crie a sequência 1 de <strong>{requestedToolCode}</strong> e informe os parâmetros técnicos manualmente.</p>
+              </div>
               <Button
                 type="button"
-                className="mt-5 bg-orange-500 font-semibold hover:bg-orange-600"
+                className="w-full shrink-0 bg-orange-500 font-semibold hover:bg-orange-600 sm:w-auto"
                 onClick={openBlankForRequested}
               >
                 <FilePlus2 className="size-4" />
                 Criar ficha em branco
               </Button>
-            </div>
+            </section>
 
-            <div className="min-w-0 rounded-xl border bg-white p-4">
-              <div className="flex items-start gap-3">
+            <section className="min-w-0 rounded-2xl border bg-white p-4 md:p-5">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
                 <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-700">
                   <CopyPlus className="size-4" />
                 </span>
-                <div>
+                <div className="min-w-0 flex-1">
                   <h3 className="font-semibold text-slate-950">
                     Copiar uma ficha existente
                   </h3>
@@ -931,7 +930,7 @@ export function ProcessSheetsManager({
                   </p>
                 </div>
               </div>
-              <div className="relative mt-4">
+              <div className="relative mt-4 sm:mt-0 sm:w-80">
                 <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
                 <Input
                   value={templateSearch}
@@ -941,7 +940,7 @@ export function ProcessSheetsManager({
                   aria-label="Buscar ficha para copiar"
                 />
               </div>
-              <div className="mt-3 max-h-[42dvh] space-y-2 overflow-y-auto pr-1">
+              <div className="mt-4 max-h-[45dvh] overflow-y-auto pr-1">
                 {loadingTemplates ? (
                   <div className="grid min-h-32 place-items-center text-sm text-slate-500">
                     <span className="flex items-center gap-2">
@@ -954,14 +953,14 @@ export function ProcessSheetsManager({
                     Nenhuma ficha encontrada para este filtro.
                   </div>
                 ) : (
-                  visibleTemplates.map((sheet) => {
+                  <div className="grid gap-2 lg:grid-cols-2">{visibleTemplates.map((sheet) => {
                     const productivity =
                       sheet.achieved_productivity_kg_h ??
                       sheet.parameters.extrusion?.target_productivity_kg_h;
                     return (
                       <div
                         key={sheet.id}
-                        className="flex items-center gap-3 rounded-lg border p-3 transition hover:border-orange-300 hover:bg-orange-50/30"
+                        className="flex min-w-0 flex-col gap-3 rounded-xl border p-3 transition hover:border-orange-300 hover:bg-orange-50/30 sm:flex-row sm:items-center"
                       >
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
@@ -984,17 +983,17 @@ export function ProcessSheetsManager({
                           type="button"
                           variant="outline"
                           size="sm"
-                          className="shrink-0"
+                          className="w-full shrink-0 sm:w-auto"
                           onClick={() => copyTemplateForRequested(sheet)}
                         >
                           Usar como modelo
                         </Button>
                       </div>
                     );
-                  })
+                  })}</div>
                 )}
               </div>
-            </div>
+            </section>
           </div>
         </DialogContent>
       </Dialog>

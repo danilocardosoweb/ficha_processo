@@ -192,3 +192,14 @@ Estas não são falhas de implementação. São cadastros físicos que precisam 
 - atualizações rotineiras buscam somente registros modificados; uma conferência integral permanece programada a cada doze horas para corrigir eventual divergência;
 - múltiplos pedidos de sincronização próximos são agrupados e executados em fila, evitando chamadas concorrentes duplicadas;
 - o indicador não permanece mais em “Salvando dados locais” quando já existe uma cópia utilizável e a atualização está ocorrendo em segundo plano.
+
+### 2026-08-28 — Revisão de UX operacional
+
+- ferramentas que completaram quatro horas de aquecimento agora recebem uma escala visual vermelha progressiva até oito horas, destacando a urgência sem confundir “pronta” com “liberada”;
+- o mapa do forno passou a exibir quanto tempo a ferramenta está pronta em cada vaga;
+- o fluxo de criação de ficha inexistente foi reorganizado em um modal amplo e responsivo, separando claramente a criação em branco da cópia auditável de uma receita existente;
+- fichas disponíveis para cópia passaram a usar uma grade legível, com pesquisa e ações sem compressão lateral;
+- recomendações repetidas passaram a ser agrupadas por causa e ação, com ferramentas afetadas visíveis em etiquetas e detalhes expansíveis;
+- o painel mostra primeiro os quatro grupos prioritários e permite expandir o restante sob demanda;
+- o Gantt ganhou visão geral e visão detalhada, escala horizontal proporcional ao horizonte, cabeçalho e identificação de prensa fixos e uma faixa sequencial com todos os códigos completos;
+- nenhuma regra produtiva, aprovação ou cálculo operacional foi removido nesta revisão.
