@@ -202,4 +202,6 @@ Estas não são falhas de implementação. São cadastros físicos que precisam 
 - recomendações repetidas passaram a ser agrupadas por causa e ação, com ferramentas afetadas visíveis em etiquetas e detalhes expansíveis;
 - o painel mostra primeiro os quatro grupos prioritários e permite expandir o restante sob demanda;
 - o Gantt ganhou visão geral e visão detalhada, escala horizontal proporcional ao horizonte, cabeçalho e identificação de prensa fixos e uma faixa sequencial com todos os códigos completos;
+- o Gantt passou a oferecer zoom contínuo de 32% a 236%, com botões de aproximação, controle deslizante, percentual visível e atalhos para visão geral e códigos legíveis;
+- os horários das extremidades da escala foram alinhados para permanecerem inteiramente visíveis durante a ampliação;
 - nenhuma regra produtiva, aprovação ou cálculo operacional foi removido nesta revisão.
