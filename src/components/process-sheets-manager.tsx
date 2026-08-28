@@ -673,7 +673,7 @@ export function ProcessSheetsManager({
         setRequestedToolCode("");
         setTargetSequence(null);
         formElement.reset();
-        requestOfflineSync();
+        requestOfflineSync("process_sheets");
         if (shouldReturn) {
           router.push(`/producao?tool=${encodeURIComponent(savedToolCode)}`);
           return;

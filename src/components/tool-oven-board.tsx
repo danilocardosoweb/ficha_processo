@@ -209,7 +209,7 @@ export function ToolOvenBoard() {
       if (error) throw error;
       setSelected(null); setOvenId(""); setOvenPosition(""); setTargetMachine(""); setNotes(""); setDialogProblem("");
       setMessage(`${selected.tool} entrou no forno. O contador já está em andamento.`);
-      requestOfflineSync(); await load();
+      requestOfflineSync("tool_heating_cycles"); await load();
     } catch (error) { setDialogProblem(errorMessage(error)); await load(true); }
     finally { setSaving(false); }
   }
@@ -227,7 +227,7 @@ export function ToolOvenBoard() {
       const tool = releaseCycle.tool_code;
       setReleaseCycle(null); setReleaseReason(""); setDialogProblem("");
       setMessage(early ? `${tool} liberada antecipadamente. A justificativa foi registrada.` : `${tool} liberada para abrir a ficha e produzir.`);
-      requestOfflineSync(); await load();
+      requestOfflineSync("tool_heating_cycles"); await load();
     } catch (error) { setDialogProblem(errorMessage(error)); }
     finally { setSaving(false); }
   }
@@ -263,7 +263,7 @@ export function ToolOvenBoard() {
       const movedTool = relocateCycle.tool_code;
       setRelocateCycle(null); setRelocateReason(""); setDialogProblem("");
       setMessage(`${movedTool} realocada com sucesso. O histórico foi preservado.`);
-      requestOfflineSync(); await load();
+      requestOfflineSync("tool_heating_cycles"); await load();
     } catch (error) { setDialogProblem(errorMessage(error)); await load(true); }
     finally { setSaving(false); }
   }

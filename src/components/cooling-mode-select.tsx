@@ -156,7 +156,7 @@ export function CoolingModeSelect({
       select(created.label);
       setNewMode("");
       setDialogOpen(false);
-      requestOfflineSync();
+      requestOfflineSync("operational_catalogs");
     } catch (error) {
       setProblem(
         error instanceof Error

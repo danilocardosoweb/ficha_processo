@@ -96,7 +96,7 @@ export function ToolsManager() {
     try {
       const { error: saveError } = await withSupabaseTimeout(query);
       if (saveError) setError(saveError.code === "23505" ? "Já existe esta ferramenta e sequência." : saveError.message);
-      else { setMessage(editing ? "Ferramenta atualizada." : "Ferramenta cadastrada."); setFormOpen(false); setEditing(null); requestOfflineSync(); await load(); }
+      else { setMessage(editing ? "Ferramenta atualizada." : "Ferramenta cadastrada."); setFormOpen(false); setEditing(null); requestOfflineSync("tools"); await load(); }
     } catch { setError("Não foi possível salvar. Verifique a conexão com o Supabase e tente novamente."); }
     finally { setSaving(false); }
   }
@@ -104,7 +104,7 @@ export function ToolsManager() {
   return <section className="rounded-xl border bg-white shadow-sm">
     <div className="flex flex-col gap-4 border-b p-5 lg:flex-row lg:items-end lg:justify-between">
       <div><h2 className="font-heading font-bold">Ferramentas cadastradas</h2><p className="mt-1 text-xs text-slate-500">{total.toLocaleString("pt-BR")} ferramenta(s) física(s). Dados do histórico Excel, separados por matriz e sequência.</p></div>
-      <div className="flex flex-wrap gap-2"><ToolHistoryImport onImported={() => { setPage(0); requestOfflineSync(); void load(); }} /><Button type="button" variant="outline" onClick={() => openForm(null)}><Plus className="size-4" />Nova ferramenta</Button></div>
+      <div className="flex flex-wrap gap-2"><ToolHistoryImport onImported={() => { setPage(0); requestOfflineSync("tools"); void load(); }} /><Button type="button" variant="outline" onClick={() => openForm(null)}><Plus className="size-4" />Nova ferramenta</Button></div>
     </div>
     <div className="flex flex-col gap-3 border-b p-4 lg:flex-row">
       <div className="relative flex-1"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><Input value={searchInput} onChange={event => setSearchInput(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { setPage(0); setSearch(searchInput); } }} className="pl-9" placeholder="Buscar ferramenta (ex.: DIN7501 ou DIN-7501)..." /></div>

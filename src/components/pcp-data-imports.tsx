@@ -5,7 +5,6 @@ import { CheckCircle2, FileClock, FileSpreadsheet, Loader2, ShoppingCart, Upload
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { createClient } from "@/lib/supabase/client";
-import { requestOfflineSync } from "@/lib/offline-store";
 import type { PcpImportBatch, PcpImportType } from "@/types/database";
 import { useCurrentUser } from "@/components/current-user-provider";
 
@@ -213,7 +212,7 @@ export function PcpDataImports({ batches, onImported }: { batches: Partial<Recor
       }
       const { error: finishError } = await supabase.from("pcp_import_batches").update({ status: "processed", processed_at: new Date().toISOString(), row_count: parsed.rows.length }).eq("id", batch.id);
       if (finishError) throw finishError;
-      setProgress(100); requestOfflineSync(); onImported(); setType(null);
+      setProgress(100); onImported(); setType(null);
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message : typeof cause === "object" && cause ? String((cause as Record<string, unknown>).message ?? "") : "";
       setError(detail || "Falha ao salvar a importação.");

@@ -591,7 +591,7 @@ export function SimplifiedImport() {
           .eq("id", batch.id);
         if (finishError) throw finishError;
       }
-      requestOfflineSync();
+      requestOfflineSync(["machines", "production_orders"]);
       setDone(true);
     } catch (cause) {
       const detail =

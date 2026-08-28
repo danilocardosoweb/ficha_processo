@@ -1,23 +1,25 @@
 "use client";
 
 import { Cloud, CloudOff, Loader2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
-import { getOfflineSnapshot, syncOperationalData } from "@/lib/offline-store";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { getOfflineSnapshot, syncOperationalData, type OfflineResource } from "@/lib/offline-store";
 
 type State = "syncing" | "online" | "offline" | "error";
 
 export function OfflineStatus() {
   const [state, setState] = useState<State>("syncing");
   const [lastSync, setLastSync] = useState<string | null>(null);
+  const pendingResources = useRef(new Set<OfflineResource>());
+  const requestedTimer = useRef<number | null>(null);
 
-  const sync = useCallback(async () => {
+  const sync = useCallback(async (resources?: OfflineResource[], foreground = false, force = false) => {
     if (!navigator.onLine) {
       setState("offline");
       return;
     }
-    setState("syncing");
+    if (foreground) setState("syncing");
     try {
-      await syncOperationalData();
+      await syncOperationalData({ resources, force });
       const cached = await getOfflineSnapshot("process_sheets");
       setLastSync(cached?.syncedAt ?? new Date().toISOString());
       setState("online");
@@ -34,13 +36,38 @@ export function OfflineStatus() {
         scope: "/",
         updateViaCache: "none",
       });
-    const online = () => void sync();
+    let cancelled = false;
+    const initialize = async () => {
+      const cached = await getOfflineSnapshot("process_sheets").catch(() => null);
+      if (cancelled) return;
+      setLastSync(cached?.syncedAt ?? null);
+      if (!navigator.onLine) {
+        setState(cached ? "offline" : "error");
+        return;
+      }
+      if (cached) {
+        setState("online");
+        void sync();
+      } else {
+        void sync(undefined, true);
+      }
+    };
+    const online = () => void sync(undefined, false, true);
     const offline = () => setState("offline");
-    const requested = () => void sync();
+    const requested = (event: Event) => {
+      const resources = (event as CustomEvent<{ resources?: OfflineResource[] }>).detail?.resources ?? [];
+      resources.forEach((resource) => pendingResources.current.add(resource));
+      if (requestedTimer.current) window.clearTimeout(requestedTimer.current);
+      requestedTimer.current = window.setTimeout(() => {
+        const queued = [...pendingResources.current];
+        pendingResources.current.clear();
+        void sync(queued.length ? queued : undefined, false, true);
+      }, 250);
+    };
     window.addEventListener("online", online);
     window.addEventListener("offline", offline);
     window.addEventListener("alummes-request-sync", requested);
-    const initialSync = window.setTimeout(() => void sync(), 0);
+    const initialSync = window.setTimeout(() => void initialize(), 0);
     const interval = window.setInterval(
       () => {
         if (navigator.onLine) void sync();
@@ -48,10 +75,12 @@ export function OfflineStatus() {
       15 * 60 * 1000,
     );
     return () => {
+      cancelled = true;
       window.removeEventListener("online", online);
       window.removeEventListener("offline", offline);
       window.removeEventListener("alummes-request-sync", requested);
       window.clearTimeout(initialSync);
+      if (requestedTimer.current) window.clearTimeout(requestedTimer.current);
       window.clearInterval(interval);
     };
   }, [sync]);

@@ -182,3 +182,13 @@ Estas não são falhas de implementação. São cadastros físicos que precisam 
 - o banco já contém duas observações históricas iniciais; o uso automático da produtividade aprendida respeita o mínimo configurado de amostras;
 - funções internas de gatilho tiveram execução direta removida de usuários anônimos e autenticados;
 - migrations aplicadas diretamente ao Supabase do projeto; nenhuma atualização foi enviada ao GitHub.
+
+### 2026-08-28 — Sincronização local rápida
+
+- mantido o IndexedDB como armazenamento estruturado e offline; CSV foi descartado porque exigiria conversão adicional, perderia tipos e não aceleraria consultas;
+- a abertura do app reutiliza imediatamente a cópia local existente e atualiza o cache em segundo plano;
+- sincronizações com menos de cinco minutos são reaproveitadas, evitando downloads repetidos ao navegar entre telas;
+- após um salvamento, apenas o recurso alterado é sincronizado, em vez dos seis cadastros operacionais;
+- atualizações rotineiras buscam somente registros modificados; uma conferência integral permanece programada a cada doze horas para corrigir eventual divergência;
+- múltiplos pedidos de sincronização próximos são agrupados e executados em fila, evitando chamadas concorrentes duplicadas;
+- o indicador não permanece mais em “Salvando dados locais” quando já existe uma cópia utilizável e a atualização está ocorrendo em segundo plano.

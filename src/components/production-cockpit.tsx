@@ -752,7 +752,7 @@ export function ProductionCockpit() {
       },
       ...current,
     ]);
-    requestOfflineSync();
+    requestOfflineSync("tool_heating_cycles");
   }
 
   async function continueAfterPreheatedConfirmation() {
@@ -821,7 +821,7 @@ export function ProductionCockpit() {
       setMessage(
         `${updated.length === 1 ? `Produção ${updated[0].order_number}` : `Campanha com ${updated.length} itens`} iniciada por ${operatorName}.`,
       );
-      requestOfflineSync();
+      requestOfflineSync("production_orders");
     } catch (cause) {
       setMessage(errorMessage(cause));
     } finally {
@@ -922,7 +922,7 @@ export function ProductionCockpit() {
       setMessage(
         `${completed.length === 1 ? `Item ${completed[0].order_number}` : `Campanha com ${completed.length} itens`} concluído(a) e removido(a) da fila. O histórico de cada Plano foi preservado.`,
       );
-      requestOfflineSync();
+      requestOfflineSync(["production_orders", "process_sheets"]);
     } catch (cause) {
       setMessage(errorMessage(cause));
     } finally {
@@ -1051,7 +1051,7 @@ export function ProductionCockpit() {
             ? `Parada aberta. O item foi pausado e a ocorrência foi enviada para Manutenção.`
             : `Parada aberta. O item foi pausado e permanece no histórico operacional.`,
       );
-      requestOfflineSync();
+      requestOfflineSync("production_orders");
     } catch (cause) {
       setMessage(errorMessage(cause));
     } finally {
@@ -1090,7 +1090,7 @@ export function ProductionCockpit() {
       applyOrders([data.id], [data as Order]);
       setHistoryOpen(false);
       setMessage(`Item ${data.order_number} reprogramado com segurança.`);
-      requestOfflineSync();
+      requestOfflineSync("production_orders");
     } catch (cause) {
       setMessage(errorMessage(cause));
     } finally {
@@ -1745,7 +1745,7 @@ export function ProductionCockpit() {
             setMessage(
               `Ficha ${saved.product_code || saved.tool_code} atualizada por ${operatorName}. O valor anterior foi preservado para auditoria.`,
             );
-            requestOfflineSync();
+            requestOfflineSync("process_sheets");
           }}
         />
       )}
