@@ -119,3 +119,6 @@ Interface
 - criado o calendário auditável de indisponibilidades planejadas de prensa;
 - o motor agora subtrai esses intervalos dos turnos produtivos e recalcula início e término dos itens;
 - a fotografia dos turnos e indisponibilidades também é preservada em cada versão do cenário.
+- migrations AluPilot aplicadas ao projeto Supabase `Supervisorio Prensa` em 28/08/2026: cenários, estoque de tarugos, recursos das prensas e calendário operacional;
+- verificação pós-aplicação confirmou nove tabelas com RLS ativo, onze RPCs disponíveis e histórico das quatro migrations registrado no Supabase;
+- diagnósticos de segurança e desempenho executados; os avisos de RLS sem policy são esperados neste modelo, pois as tabelas permanecem sem acesso direto e as operações usam RPCs validadas por token local.
