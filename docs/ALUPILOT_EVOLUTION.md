@@ -131,3 +131,6 @@ Interface
 - a tela de tarugos passou a mostrar o peso físico e o peso livre em kg por lote, além da quantidade de barras;
 - modelo dos novos cenários atualizado para `alupilot-v1.1`;
 - foi identificado que as 27 ordens ativas possuem Furos e BO, porém ainda não possuem vínculo de carcaça nem ficha de processo correspondente; esse dado permanece explicitamente pendente, sem inferência automática insegura.
+- a linha do tempo passou a separar quantidade líquida do pedido e necessidade bruta de tarugo, calculada sobre o saldo líquido pela eficiência configurada da prensa;
+- o antigo saldo isolado por ferramenta foi substituído visualmente por uma trilha de saldo projetado por liga: carga inicial calculada, consumo bruto cronológico, equivalência em barras e saldo final destacado;
+- o cálculo do saldo projetado cruza os horários das duas prensas para representar a ordem real prevista de consumo da mesma liga.

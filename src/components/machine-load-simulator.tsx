@@ -27,6 +27,7 @@ interface CarcassResource { id: string; machineCode: string; sharedAcrossMachine
 interface RawUnavailability { id: string; resourceType: ResourceUnavailabilityInput["resourceType"]; resourceCode: string; startsAt: string; endsAt: string; reason: string; status: ResourceUnavailabilityInput["status"]; }
 interface ScenarioSummary { id: string; name: string; description: string | null; status: string; currentVersion: number; requestedStartAt: string | null; createdAt: string; updatedAt: string; createdBy: string | null; }
 interface LoadedScenario { scenarioId: string; name: string; description: string | null; versionNumber: number; mode: "fifo" | "optimized" | "manual"; requestedStartAt: string; inputs?: { selectedMachine?: string }; rules?: { unavailability?: ResourceUnavailabilityInput[]; billetStock?: { capturedAt?: string; summary?: BilletStockSummary[] }; carcassResources?: { capturedAt?: string; items?: CarcassResource[] } }; result: ReturnType<typeof simulateMachineLoad>; createdAt: string; }
+interface ProjectedBilletBalance { beforeKg: number; consumedKg: number; afterKg: number; initialKg: number; barWeightKg: number; remainingBarEquivalent: number; isFinalForAlloy: boolean; }
 
 const defaultSettings: MachineLoadSettings = { billetBarWeightKg: 415, extrusionEfficiency: 0.85, defaultProductivityKgH: 1000, setupMinutes: 20, alloyChangeMinutes: 15, toolHeatingMinutes: 240, ovenSlots: 21 };
 const numberValue = (value: unknown) => typeof value === "number" ? value : Number(String(value ?? "").replace(/\./g, "").replace(",", ".")) || 0;
@@ -303,7 +304,7 @@ export function MachineLoadSimulator() {
 
     <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
       <div className="flex items-center justify-between border-b px-4 py-3"><div><h2 className="font-heading font-bold text-slate-900">Simulação operacional</h2><p className="text-xs text-slate-500">Prensa + ferramenta/forno + tarugo/liga.</p></div><div className="flex rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setTab("timeline")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "timeline" ? "bg-white shadow-sm" : "text-slate-500"}`}><Clock3 className="mr-1 inline size-3.5" />Linha do tempo</button><button type="button" onClick={() => setTab("billets")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "billets" ? "bg-white shadow-sm" : "text-slate-500"}`}><PackageOpen className="mr-1 inline size-3.5" />Carga de tarugo</button></div></div>
-      {tab === "timeline" ? <Timeline machines={simulation.machines} manual={!historicalScenario && mode === "manual"} onMove={moveManualOrder} /> : <BilletTable billets={simulation.billets} settings={settings} stock={displayedBilletStock} available={hasBilletStockSnapshot} />}
+      {tab === "timeline" ? <Timeline machines={simulation.machines} projectedBalances={projectedBilletBalances(simulation)} manual={!historicalScenario && mode === "manual"} onMove={moveManualOrder} /> : <BilletTable billets={simulation.billets} settings={settings} stock={displayedBilletStock} available={hasBilletStockSnapshot} />}
     </section>
     <div className="flex items-start gap-2 rounded-xl bg-blue-50 px-4 py-3 text-xs text-blue-800"><Settings2 className="mt-0.5 size-4 shrink-0" /><p><strong>Premissas atuais:</strong> peso e eficiência seguem a configuração de cada prensa; os fornos usam 21 vagas por prensa e a regra térmica cadastrada. A carga necessária agora é comparada ao estoque físico livre, já descontadas as reservas ativas.</p></div>
     {scenarioPanel ? <ScenarioDialog mode={scenarioPanel} name={scenarioName} description={scenarioDescription} scenarios={scenarios} busy={scenarioBusy} error={scenarioError} scenarioId={scenarioId} onName={setScenarioName} onDescription={setScenarioDescription} onClose={() => { setScenarioPanel(null); setScenarioError(""); }} onSave={() => void saveScenario()} onOpen={(id) => void openSavedScenario(id)} /> : null}
@@ -451,8 +452,28 @@ function OperationalCalendarPanel({ periods, machines }: { periods: ResourceUnav
   return <section className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs text-violet-900"><div className="flex items-start gap-2"><CalendarClock className="mt-0.5 size-4 shrink-0 text-violet-600" /><div><p className="font-black">Calendário de indisponibilidades aplicado</p><div className="mt-1 space-y-1">{relevant.map((period) => <p key={period.id}><strong>{machineLabel(period.resourceCode)}</strong> · {formatDateTime(new Date(period.startsAt))} até {formatDateTime(new Date(period.endsAt))} · {period.reason}</p>)}</div><p className="mt-1 text-violet-700">Esses intervalos foram retirados automaticamente das janelas produtivas.</p></div></div></section>;
 }
 
-function Timeline({ machines, manual, onMove }: {
+function projectedBilletBalances(simulation: ReturnType<typeof simulateMachineLoad>) {
+  const totals = new Map(simulation.billets.map((row) => [row.alloyCode.trim().toUpperCase(), row]));
+  const running = new Map([...totals.entries()].map(([code, row]) => [code, row.loadedKg]));
+  const orderedItems = simulation.machines.flatMap((machine) => machine.items).sort((left, right) => left.extrusionStartAt.getTime() - right.extrusionStartAt.getTime() || left.machineCode.localeCompare(right.machineCode));
+  const lastItemByAlloy = new Map<string, string>();
+  for (const item of orderedItems) lastItemByAlloy.set(item.selectedAlloy.trim().toUpperCase(), item.id);
+  return orderedItems.reduce<Record<string, ProjectedBilletBalance>>((result, item) => {
+    const code = item.selectedAlloy.trim().toUpperCase();
+    const total = totals.get(code);
+    const initialKg = total?.loadedKg ?? item.billetRequiredKg;
+    const barWeightKg = total?.bars ? total.loadedKg / total.bars : 0;
+    const beforeKg = running.get(code) ?? initialKg;
+    const afterKg = Math.max(beforeKg - item.billetRequiredKg, 0);
+    running.set(code, afterKg);
+    result[item.id] = { beforeKg, consumedKg: item.billetRequiredKg, afterKg, initialKg, barWeightKg, remainingBarEquivalent: barWeightKg > 0 ? afterKg / barWeightKg : 0, isFinalForAlloy: lastItemByAlloy.get(code) === item.id };
+    return result;
+  }, {});
+}
+
+function Timeline({ machines, projectedBalances, manual, onMove }: {
   machines: ReturnType<typeof simulateMachineLoad>["machines"];
+  projectedBalances: Record<string, ProjectedBilletBalance>;
   manual: boolean;
   onMove: (machineCode: string, draggedId: string, targetId: string) => void;
 }) {
@@ -460,6 +481,7 @@ function Timeline({ machines, manual, onMove }: {
   const [overId, setOverId] = useState<string | null>(null);
 
   return <div className="divide-y">
+    <div className="flex items-start gap-2 bg-blue-50 px-4 py-2.5 text-xs text-blue-800"><PackageOpen className="mt-0.5 size-4 shrink-0" /><p><strong>Saldo projetado da liga:</strong> começa na carga total calculada em barras e desconta o bruto necessário de cada ferramenta pela ordem real de início, cruzando as duas prensas. O último consumo destaca o saldo final previsto.</p></div>
     {manual && <div className="flex items-center gap-2 bg-orange-50 px-4 py-2 text-xs font-semibold text-orange-800">
       <GripVertical className="size-4" />
       Arraste uma linha pela alça para testar outra sequência. Horários, barras e saldo de tarugo são recalculados automaticamente.
@@ -470,9 +492,9 @@ function Timeline({ machines, manual, onMove }: {
         <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold text-slate-600">realista {formatDuration(machine.simulatedMinutes)}</span>
       </div>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[1420px] text-left text-xs">
+        <table className="w-full min-w-[1640px] text-left text-xs">
           <thead className="bg-slate-50 text-[9px] uppercase tracking-wide text-slate-500">
-            <tr><th className="px-3 py-2"># / Ferramenta</th><th className="px-3 py-2">Recursos</th><th className="px-3 py-2">Plano</th><th className="px-3 py-2">Pedido / ordem</th><th className="px-3 py-2">Qtd. pedida</th><th className="px-3 py-2">Saldo do pedido</th><th className="px-3 py-2">Preparação</th><th className="px-3 py-2">Início</th><th className="px-3 py-2">Duração</th><th className="px-3 py-2">Fim</th><th className="px-3 py-2">Produtividade</th><th className="px-3 py-2">Liga / barras</th><th className="px-3 py-2 text-right">Saldo de tarugo</th></tr>
+            <tr><th className="px-3 py-2"># / Ferramenta</th><th className="px-3 py-2">Recursos</th><th className="px-3 py-2">Plano</th><th className="px-3 py-2">Pedido / ordem</th><th className="px-3 py-2">Qtd. pedida<br /><span className="normal-case text-slate-400">líquido</span></th><th className="px-3 py-2">Saldo do pedido</th><th className="px-3 py-2">Bruto necessário<br /><span className="normal-case text-slate-400">com eficiência</span></th><th className="px-3 py-2">Preparação</th><th className="px-3 py-2">Início</th><th className="px-3 py-2">Duração</th><th className="px-3 py-2">Fim</th><th className="px-3 py-2">Produtividade</th><th className="px-3 py-2">Liga / barras</th><th className="px-3 py-2">Saldo projetado da liga</th></tr>
           </thead>
           <tbody>{machine.items.map((item, index) => <tr
             key={item.id}
@@ -506,13 +528,14 @@ function Timeline({ machines, manual, onMove }: {
             <td className="px-3 py-2.5 font-mono font-bold text-slate-700">{item.orderNumber}</td>
             <td className="px-3 py-2.5 font-bold tabular-nums">{formatNumber(item.targetKg)} kg</td>
             <td className="px-3 py-2.5 font-bold tabular-nums text-blue-700">{formatNumber(item.remainingKg)} kg</td>
+            <td className="px-3 py-2.5"><strong className="tabular-nums text-slate-900">{formatNumber(item.billetRequiredKg)} kg</strong><span className="block text-[9px] text-slate-400">{formatNumber(item.billetRequiredKg > 0 ? (item.remainingKg / item.billetRequiredKg) * 100 : 0, 0)}% eficiência</span></td>
             <td className="px-3 py-2.5"><span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[9px] font-bold ${item.thermalWaitMinutes > 0.5 ? "bg-red-100 text-red-700" : item.toolHeatingState === "released" ? "bg-emerald-50 text-emerald-700" : item.toolHeatingState === "heating" ? "bg-orange-50 text-orange-700" : "bg-amber-50 text-amber-700"}`}><Flame className="size-3" />{item.thermalWaitMinutes > 0.5 ? `Espera ${formatDuration(item.thermalWaitMinutes)}` : item.toolHeatingState === "released" ? "Liberada" : item.toolHeatingState === "heating" ? "Aquecendo" : "Simulada 4h"}</span>{item.ovenSlotNumber && item.toolHeatingState !== "released" && <span className="mt-1 block text-[9px] text-slate-400">Vaga {item.ovenSlotNumber} · entrar até {formatDateTime(item.latestHeatingStartAt)}</span>}</td>
             <td className="px-3 py-2.5 tabular-nums">{formatDateTime(item.extrusionStartAt)}</td>
             <td className="px-3 py-2.5 font-bold tabular-nums">{formatDuration(item.theoreticalMinutes)}</td>
             <td className="px-3 py-2.5 tabular-nums">{formatDateTime(item.endAt)}</td>
             <td className="px-3 py-2.5"><strong>{formatNumber(item.productivityKgH, 0)} kg/h</strong><span className="block text-[9px] text-slate-400">{sourceLabel[item.productivitySource]}</span></td>
             <td className="px-3 py-2.5"><strong>{item.selectedAlloy}</strong><span className="block text-[10px] text-slate-400">+{item.billetBarsLoaded} barra(s)</span></td>
-            <td className="px-3 py-2.5 text-right font-bold tabular-nums text-violet-700">{formatNumber(item.billetBalanceAfterKg)} kg</td>
+            <td className="px-3 py-2.5"><ProjectedBalanceCell balance={projectedBalances[item.id]} /></td>
           </tr>)}</tbody>
         </table>
       </div>
@@ -521,6 +544,11 @@ function Timeline({ machines, manual, onMove }: {
 }
 function ResourceChip({ label, value, missing }: { label: string; value: string; missing: boolean }) {
   return <span className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-1 text-[9px] font-bold ${missing ? "border-amber-200 bg-amber-50 text-amber-700" : "border-slate-200 bg-slate-50 text-slate-700"}`}><span className="uppercase text-slate-400">{label}</span>{value}</span>;
+}
+function ProjectedBalanceCell({ balance }: { balance?: ProjectedBilletBalance }) {
+  if (!balance) return <span className="text-slate-400">—</span>;
+  const remainingPercent = balance.initialKg > 0 ? Math.min((balance.afterKg / balance.initialKg) * 100, 100) : 0;
+  return <div className={`min-w-44 rounded-lg border px-2 py-1.5 ${balance.isFinalForAlloy ? "border-violet-200 bg-violet-50" : "border-slate-200 bg-white"}`}><div className="flex items-center justify-between gap-2 font-bold tabular-nums"><span className="text-slate-500">{formatNumber(balance.beforeKg, 0)}</span><span className="text-slate-300">→</span><span className={balance.isFinalForAlloy ? "text-violet-700" : "text-slate-900"}>{formatNumber(balance.afterKg, 0)} kg</span></div><div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${balance.isFinalForAlloy ? "bg-violet-500" : "bg-blue-500"}`} style={{ width: `${remainingPercent}%` }} /></div><span className="mt-1 block text-[9px] text-slate-500">consome {formatNumber(balance.consumedKg, 0)} kg · {formatNumber(balance.remainingBarEquivalent, 1)} barra(s) eq.{balance.isFinalForAlloy ? " · saldo final" : ""}</span></div>;
 }
 function BilletTable({ billets, settings, stock, available }: { billets: ReturnType<typeof simulateMachineLoad>["billets"]; settings: Record<string, MachineLoadSettings>; stock: BilletStockSummary[]; available: boolean }) {
   const base = Object.values(settings)[0] ?? defaultSettings;
