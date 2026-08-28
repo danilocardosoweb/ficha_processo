@@ -35,6 +35,16 @@ export interface WorkShiftInput {
   isActive: boolean;
 }
 
+export interface ResourceUnavailabilityInput {
+  id: string;
+  resourceType: "press" | "oven" | "tool" | "carcass";
+  resourceCode: string;
+  startsAt: Date;
+  endsAt: Date;
+  reason: string;
+  status: "active" | "cancelled";
+}
+
 export interface MachineLoadSettings {
   billetBarWeightKg: number;
   extrusionEfficiency: number;
@@ -124,7 +134,7 @@ const timeParts = (value: string) => {
   return { hours: hours || 0, minutes: minutes || 0 };
 };
 
-function workWindows(from: Date, shifts: WorkShiftInput[], machineCode: string, horizonDays = 14) {
+function workWindows(from: Date, shifts: WorkShiftInput[], machineCode: string, horizonDays = 14, unavailable: ResourceUnavailabilityInput[] = []) {
   const applicable = shifts.filter((shift) => shift.isActive && (!shift.machineCodes.length || shift.machineCodes.includes(machineCode)));
   const windows: WorkWindow[] = [];
   const firstDay = new Date(from.getFullYear(), from.getMonth(), from.getDate() - 1);
@@ -141,39 +151,47 @@ function workWindows(from: Date, shifts: WorkShiftInput[], machineCode: string, 
     }
   }
   windows.sort((left, right) => left.start.getTime() - right.start.getTime());
-  return windows.reduce<WorkWindow[]>((merged, window) => {
-    const previous = merged.at(-1);
+  const merged = windows.reduce<WorkWindow[]>((result, window) => {
+    const previous = result.at(-1);
     if (previous && window.start <= previous.end) {
       if (window.end > previous.end) previous.end = window.end;
-    } else merged.push({ start: new Date(window.start), end: new Date(window.end) });
-    return merged;
+    } else result.push({ start: new Date(window.start), end: new Date(window.end) });
+    return result;
   }, []);
+  const blocked = unavailable.filter((period) => period.status === "active" && period.resourceType === "press" && period.resourceCode === machineCode).sort((left, right) => left.startsAt.getTime() - right.startsAt.getTime());
+  return blocked.reduce<WorkWindow[]>((available, period) => available.flatMap((window) => {
+    if (period.endsAt <= window.start || period.startsAt >= window.end) return [window];
+    const fragments: WorkWindow[] = [];
+    if (period.startsAt > window.start) fragments.push({ start: window.start, end: new Date(Math.min(period.startsAt.getTime(), window.end.getTime())) });
+    if (period.endsAt < window.end) fragments.push({ start: new Date(Math.max(period.endsAt.getTime(), window.start.getTime())), end: window.end });
+    return fragments.filter((fragment) => fragment.end > fragment.start);
+  }), merged);
 }
 
-export function nextWorkingInstant(at: Date, shifts: WorkShiftInput[], machineCode: string) {
-  const window = workWindows(at, shifts, machineCode).find((item) => at < item.end);
+export function nextWorkingInstant(at: Date, shifts: WorkShiftInput[], machineCode: string, unavailable: ResourceUnavailabilityInput[] = []) {
+  const window = workWindows(at, shifts, machineCode, 14, unavailable).find((item) => at < item.end);
   if (!window) throw new Error(`Não há turno ativo disponível para a prensa ${machineCode}.`);
   return new Date(Math.max(at.getTime(), window.start.getTime()));
 }
 
-export function addWorkingMinutes(at: Date, minutesToAdd: number, shifts: WorkShiftInput[], machineCode: string) {
-  let cursor = nextWorkingInstant(at, shifts, machineCode);
+export function addWorkingMinutes(at: Date, minutesToAdd: number, shifts: WorkShiftInput[], machineCode: string, unavailable: ResourceUnavailabilityInput[] = []) {
+  let cursor = nextWorkingInstant(at, shifts, machineCode, unavailable);
   let remaining = Math.max(minutesToAdd, 0);
   for (let guard = 0; remaining > 0 && guard < 1_000; guard += 1) {
-    const window = workWindows(cursor, shifts, machineCode).find((item) => cursor >= item.start && cursor < item.end);
-    if (!window) { cursor = nextWorkingInstant(cursor, shifts, machineCode); continue; }
+    const window = workWindows(cursor, shifts, machineCode, 14, unavailable).find((item) => cursor >= item.start && cursor < item.end);
+    if (!window) { cursor = nextWorkingInstant(cursor, shifts, machineCode, unavailable); continue; }
     const available = (window.end.getTime() - cursor.getTime()) / minute;
     if (remaining <= available) return new Date(cursor.getTime() + remaining * minute);
     remaining -= available;
-    cursor = nextWorkingInstant(new Date(window.end.getTime() + 1), shifts, machineCode);
+    cursor = nextWorkingInstant(new Date(window.end.getTime() + 1), shifts, machineCode, unavailable);
   }
   if (remaining <= 0) return cursor;
   throw new Error(`Não foi possível calcular os turnos da prensa ${machineCode}.`);
 }
 
-function workingMinutesBetween(from: Date, to: Date, shifts: WorkShiftInput[], machineCode: string) {
+function workingMinutesBetween(from: Date, to: Date, shifts: WorkShiftInput[], machineCode: string, unavailable: ResourceUnavailabilityInput[] = []) {
   if (to <= from) return 0;
-  return workWindows(from, shifts, machineCode, 30).reduce((total, window) => {
+  return workWindows(from, shifts, machineCode, 30, unavailable).reduce((total, window) => {
     const start = Math.max(from.getTime(), window.start.getTime());
     const end = Math.min(to.getTime(), window.end.getTime());
     return total + Math.max(end - start, 0) / minute;
@@ -292,6 +310,7 @@ export function simulateMachineLoad(
   startedAt: Date,
   mode: "fifo" | "optimized" = "fifo",
   shifts: WorkShiftInput[] = [],
+  unavailable: ResourceUnavailabilityInput[] = [],
 ): LoadSimulation {
   if (!shifts.some((shift) => shift.isActive)) throw new Error("Cadastre pelo menos um turno ativo para calcular a Carga Máquina.");
   const balances = new Map<string, number>();
@@ -305,7 +324,7 @@ export function simulateMachineLoad(
   for (const [machineCode, machineOrders] of machineGroups) {
     const settings = settingsByMachine[machineCode] ?? Object.values(settingsByMachine)[0];
     const queue = mode === "optimized" ? optimizedQueue(machineOrders) : [...machineOrders].sort((a, b) => a.sequence - b.sequence);
-    let pressAvailable = nextWorkingInstant(startedAt, shifts, machineCode);
+    let pressAvailable = nextWorkingInstant(startedAt, shifts, machineCode, unavailable);
     let previousAlloy = "";
     const toolAvailability = new Map<string, Date>();
     const ovenSlots = Array.from({ length: Math.max(settings.ovenSlots, 1) }, () => new Date(startedAt));
@@ -345,15 +364,15 @@ export function simulateMachineLoad(
       }
       toolAvailability.set(toolKey, readyAt);
       const pressReadyAt = new Date(pressAvailable);
-      const resourceReady = nextWorkingInstant(new Date(Math.max(pressReadyAt.getTime(), readyAt.getTime())), shifts, machineCode);
-      const thermalWaitMinutes = workingMinutesBetween(pressReadyAt, resourceReady, shifts, machineCode);
+      const resourceReady = nextWorkingInstant(new Date(Math.max(pressReadyAt.getTime(), readyAt.getTime())), shifts, machineCode, unavailable);
+      const thermalWaitMinutes = workingMinutesBetween(pressReadyAt, resourceReady, shifts, machineCode, unavailable);
       const latestHeatingStartAt = new Date(pressReadyAt.getTime() - settings.toolHeatingMinutes * minute);
       const selectedAlloy = chooseAlloy(order, balances, settings);
       const alloyChange = previousAlloy && previousAlloy !== selectedAlloy ? settings.alloyChangeMinutes : 0;
       const preparationMinutes = settings.setupMinutes + alloyChange;
-      const extrusionStartAt = addWorkingMinutes(resourceReady, preparationMinutes, shifts, machineCode);
+      const extrusionStartAt = addWorkingMinutes(resourceReady, preparationMinutes, shifts, machineCode, unavailable);
       const theoreticalMinutes = (remainingKg / order.productivityKgH) * 60;
-      const endAt = addWorkingMinutes(extrusionStartAt, theoreticalMinutes, shifts, machineCode);
+      const endAt = addWorkingMinutes(extrusionStartAt, theoreticalMinutes, shifts, machineCode, unavailable);
       const billetRequiredKg = remainingKg / settings.extrusionEfficiency;
       const billetBalanceBeforeKg = balances.get(selectedAlloy) ?? 0;
       const deficit = Math.max(billetRequiredKg - billetBalanceBeforeKg, 0);

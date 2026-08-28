@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Boxes, CalendarClock, Clock3, Flame, FolderOpen, Gauge, GripVertical, Loader2, PackageOpen, RefreshCw, Route, Save, Settings2, ShieldCheck, TriangleAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
-import { simulateMachineLoad, type LoadOrderInput, type MachineLoadSettings, type ProductivitySource, type WorkShiftInput } from "@/modules/planning/machine-load-simulator";
+import { simulateMachineLoad, type LoadOrderInput, type MachineLoadSettings, type ProductivitySource, type ResourceUnavailabilityInput, type WorkShiftInput } from "@/modules/planning/machine-load-simulator";
 import { SIMULATION_MODEL_VERSION } from "@/modules/planning/simulation";
 import { useCurrentUser } from "@/components/current-user-provider";
 
@@ -23,8 +23,9 @@ interface RawAlloy { tool_code: string; alloy_code: string; is_primary: boolean;
 interface BilletStockSummary { alloyCode: string; lotCount: number; totalBars: number; reservedBars: number; availableBars: number; totalWeightKg: number | string; availableWeightKg: number | string; }
 interface BilletStockPayload { summary: BilletStockSummary[]; }
 interface CarcassResource { id: string; machineCode: string; carcassCode: string; totalQuantity: number; unavailableQuantity: number; reservedQuantity: number; availableQuantity: number; status: "available" | "maintenance" | "blocked" | "inactive"; location: string | null; }
+interface RawUnavailability { id: string; resourceType: ResourceUnavailabilityInput["resourceType"]; resourceCode: string; startsAt: string; endsAt: string; reason: string; status: ResourceUnavailabilityInput["status"]; }
 interface ScenarioSummary { id: string; name: string; description: string | null; status: string; currentVersion: number; requestedStartAt: string | null; createdAt: string; updatedAt: string; createdBy: string | null; }
-interface LoadedScenario { scenarioId: string; name: string; description: string | null; versionNumber: number; mode: "fifo" | "optimized" | "manual"; requestedStartAt: string; inputs?: { selectedMachine?: string }; rules?: { billetStock?: { capturedAt?: string; summary?: BilletStockSummary[] }; carcassResources?: { capturedAt?: string; items?: CarcassResource[] } }; result: ReturnType<typeof simulateMachineLoad>; createdAt: string; }
+interface LoadedScenario { scenarioId: string; name: string; description: string | null; versionNumber: number; mode: "fifo" | "optimized" | "manual"; requestedStartAt: string; inputs?: { selectedMachine?: string }; rules?: { unavailability?: ResourceUnavailabilityInput[]; billetStock?: { capturedAt?: string; summary?: BilletStockSummary[] }; carcassResources?: { capturedAt?: string; items?: CarcassResource[] } }; result: ReturnType<typeof simulateMachineLoad>; createdAt: string; }
 
 const defaultSettings: MachineLoadSettings = { billetBarWeightKg: 415, extrusionEfficiency: 0.85, defaultProductivityKgH: 1000, setupMinutes: 20, alloyChangeMinutes: 15, toolHeatingMinutes: 240, ovenSlots: 21 };
 const numberValue = (value: unknown) => typeof value === "number" ? value : Number(String(value ?? "").replace(/\./g, "").replace(",", ".")) || 0;
@@ -61,6 +62,7 @@ export function MachineLoadSimulator() {
   const [billetStockAvailable, setBilletStockAvailable] = useState(false);
   const [carcassResources, setCarcassResources] = useState<CarcassResource[]>([]);
   const [carcassResourcesAvailable, setCarcassResourcesAvailable] = useState(false);
+  const [unavailability, setUnavailability] = useState<ResourceUnavailabilityInput[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [mode, setMode] = useState<"fifo" | "optimized" | "manual">("optimized");
@@ -86,7 +88,7 @@ export function MachineLoadSimulator() {
       const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
       if (!organizationId) throw new Error("Organização padrão não configurada.");
       const supabase = createClient();
-      const [ordersResult, sheetsResult, toolsResult, cyclesResult, alloysResult, productionSettingsResponse, billetStockResponse, carcassResponse] = await Promise.all([
+      const [ordersResult, sheetsResult, toolsResult, cyclesResult, alloysResult, productionSettingsResponse, billetStockResponse, carcassResponse, calendarResponse] = await Promise.all([
         supabase.from("production_orders").select("id,order_number,plan_code,machine_code,tool_code,alloy_code,target_kg,produced_kg,sequence,due_date,status,last_productivity_kg_h").eq("organization_id", organizationId).eq("is_active", true).in("status", ["planned", "released", "in_progress", "paused"]).order("machine_code").order("sequence"),
         supabase.from("process_sheets").select("tool_code,machine_code,parameters").eq("organization_id", organizationId).eq("is_active", true),
         supabase.from("tools").select("code,matrix_code,productivity_kg_h,holes,bo").eq("organization_id", organizationId),
@@ -95,6 +97,7 @@ export function MachineLoadSimulator() {
         fetch("/api/production-settings", { cache: "no-store" }),
         fetch("/api/billet-stock", { cache: "no-store" }),
         fetch("/api/press-resources", { cache: "no-store" }),
+        fetch("/api/resource-calendar", { cache: "no-store" }),
       ]);
       const firstError = [ordersResult.error, sheetsResult.error, toolsResult.error, cyclesResult.error, alloysResult.error].find(Boolean);
       if (firstError) throw firstError;
@@ -106,6 +109,8 @@ export function MachineLoadSimulator() {
       const carcassPayload = await carcassResponse.json().catch(() => null) as CarcassResource[] | null;
       setCarcassResources(carcassResponse.ok && Array.isArray(carcassPayload) ? carcassPayload : []);
       setCarcassResourcesAvailable(carcassResponse.ok);
+      const calendarPayload = await calendarResponse.json().catch(() => null) as RawUnavailability[] | null;
+      setUnavailability(calendarResponse.ok && Array.isArray(calendarPayload) ? calendarPayload.map((period) => ({ ...period, startsAt: new Date(period.startsAt), endsAt: new Date(period.endsAt) })) : []);
       const rawOrders = (ordersResult.data ?? []) as RawOrder[];
       const rawSheets = (sheetsResult.data ?? []) as RawSheet[];
       const rawTools = (toolsResult.data ?? []) as RawTool[];
@@ -158,9 +163,9 @@ export function MachineLoadSimulator() {
   const machineOptions = [...new Set(orders.map((order) => order.machineCode).filter((code) => !allowedMachines || allowedMachines.has(code)))].sort();
   const simulationState = useMemo(() => {
     if (!startedAt) return { simulation: null, problem: "" };
-    try { return { simulation: simulateMachineLoad(orderedVisibleOrders, settings, startedAt, mode === "manual" ? "fifo" : mode, shifts), problem: "" }; }
+    try { return { simulation: simulateMachineLoad(orderedVisibleOrders, settings, startedAt, mode === "manual" ? "fifo" : mode, shifts, unavailability), problem: "" }; }
     catch (cause) { return { simulation: null, problem: cause instanceof Error ? cause.message : "Não foi possível aplicar os turnos." }; }
-  }, [orderedVisibleOrders, settings, startedAt, mode, shifts]);
+  }, [orderedVisibleOrders, settings, startedAt, mode, shifts, unavailability]);
 
   async function openScenarioList() {
     setScenarioBusy(true); setScenarioError(""); setScenarioPanel("list");
@@ -203,7 +208,7 @@ export function MachineLoadSimulator() {
           scenarioId, name: scenarioName, description: scenarioDescription, machineCode: machine,
           mode, requestedStartAt: startedAt.toISOString(),
           inputSnapshot: { selectedMachine: machine, manualOrder, orders: orderedVisibleOrders },
-          rulesSnapshot: { modelVersion: SIMULATION_MODEL_VERSION, settingsByMachine: settings, shifts, billetStock: { capturedAt: new Date().toISOString(), summary: billetStock }, carcassResources: { capturedAt: new Date().toISOString(), items: carcassResources } },
+          rulesSnapshot: { modelVersion: SIMULATION_MODEL_VERSION, settingsByMachine: settings, shifts, unavailability, billetStock: { capturedAt: new Date().toISOString(), summary: billetStock }, carcassResources: { capturedAt: new Date().toISOString(), items: carcassResources } },
           resultSnapshot: simulationState.simulation,
         }),
       });
@@ -226,6 +231,7 @@ export function MachineLoadSimulator() {
   const hasBilletStockSnapshot = historicalScenario ? !!historicalScenario.rules?.billetStock : billetStockAvailable;
   const displayedCarcassResources = historicalScenario ? historicalScenario.rules?.carcassResources?.items ?? [] : carcassResources;
   const hasCarcassSnapshot = historicalScenario ? !!historicalScenario.rules?.carcassResources : carcassResourcesAvailable;
+  const displayedUnavailability = historicalScenario ? historicalScenario.rules?.unavailability ?? [] : unavailability;
   const estimatedEnd = simulation.machines.reduce<Date | null>((latest, item) => !item.endsAt ? latest : !latest || item.endsAt > latest ? item.endsAt : latest, null);
   function activateManualMode() {
     if (mode !== "manual") {
@@ -290,6 +296,7 @@ export function MachineLoadSimulator() {
     <AlloyWarnings machines={simulation.machines} />
     <BilletStockWarnings billets={simulation.billets} stock={displayedBilletStock} available={hasBilletStockSnapshot} />
     <PressResourceWarnings machines={simulation.machines} resources={displayedCarcassResources} available={hasCarcassSnapshot} />
+    <OperationalCalendarPanel periods={displayedUnavailability} machines={simulation.machines.map((item) => item.machineCode)} />
 
     <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
       <div className="flex items-center justify-between border-b px-4 py-3"><div><h2 className="font-heading font-bold text-slate-900">Simulação operacional</h2><p className="text-xs text-slate-500">Prensa + ferramenta/forno + tarugo/liga.</p></div><div className="flex rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setTab("timeline")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "timeline" ? "bg-white shadow-sm" : "text-slate-500"}`}><Clock3 className="mr-1 inline size-3.5" />Linha do tempo</button><button type="button" onClick={() => setTab("billets")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "billets" ? "bg-white shadow-sm" : "text-slate-500"}`}><PackageOpen className="mr-1 inline size-3.5" />Carga de tarugo</button></div></div>
@@ -411,6 +418,12 @@ function PressResourceWarnings({ machines, resources, available }: { machines: R
   if (!available) return <div className="flex flex-wrap items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-800"><Boxes className="size-4 shrink-0" /><p className="flex-1"><strong>Disponibilidade de carcaças ainda não ativada.</strong> Furos, BO e carcaça já são registrados no cenário, porém a capacidade física ainda não pode ser confirmada.</p></div>;
   if (unavailable.length) return <section className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-900"><div className="flex items-start gap-2"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-red-600" /><div><p className="font-black">Risco de recurso físico indisponível</p>{unavailable.map((item) => <p key={`${item.machineCode}-${item.carcassCode}`} className="mt-1">{machineLabel(item.machineCode)} precisa da carcaça <strong>{item.carcassCode}</strong>, mas não há unidade livre cadastrada.</p>)}{hasIncompleteData ? <p className="mt-2 text-red-700">Dados incompletos: {missingHoles} item(ns) sem furos, {missingBo} sem BO e {missingCarcass} sem carcaça.</p> : null}</div></div></section>;
   return <div className={`flex items-center gap-2 rounded-xl border px-4 py-3 text-xs ${hasIncompleteData ? "border-amber-200 bg-amber-50 text-amber-900" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}><Boxes className="size-4 shrink-0" /><p><strong>{hasIncompleteData ? "Recursos cobertos, com cadastros incompletos." : "Carcaças cobertas."}</strong> {hasIncompleteData ? `${missingHoles} item(ns) sem furos, ${missingBo} sem BO e ${missingCarcass} sem carcaça.` : "Todas as carcaças informadas possuem unidade livre na prensa correta; Furos e BO permanecem rastreados no cenário."}</p></div>;
+}
+
+function OperationalCalendarPanel({ periods, machines }: { periods: ResourceUnavailabilityInput[]; machines: string[] }) {
+  const relevant = periods.filter((period) => period.status === "active" && period.resourceType === "press" && machines.includes(period.resourceCode));
+  if (!relevant.length) return null;
+  return <section className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs text-violet-900"><div className="flex items-start gap-2"><CalendarClock className="mt-0.5 size-4 shrink-0 text-violet-600" /><div><p className="font-black">Calendário de indisponibilidades aplicado</p><div className="mt-1 space-y-1">{relevant.map((period) => <p key={period.id}><strong>{machineLabel(period.resourceCode)}</strong> · {formatDateTime(new Date(period.startsAt))} até {formatDateTime(new Date(period.endsAt))} · {period.reason}</p>)}</div><p className="mt-1 text-violet-700">Esses intervalos foram retirados automaticamente das janelas produtivas.</p></div></div></section>;
 }
 
 function Timeline({ machines, manual, onMove }: {

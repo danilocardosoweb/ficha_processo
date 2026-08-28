@@ -116,3 +116,6 @@ Interface
 - criado o cadastro de carcaças físicas por prensa, com quantidade total, indisponível, reservada e livre;
 - o simulador passou a alertar carcaça ausente ou indisponível na prensa correta e a registrar a fotografia desses recursos no cenário;
 - Furos e BO permanecem rastreados, sem alterar produtividade ou duração até existir regra validada pela Engenharia.
+- criado o calendário auditável de indisponibilidades planejadas de prensa;
+- o motor agora subtrai esses intervalos dos turnos produtivos e recalcula início e término dos itens;
+- a fotografia dos turnos e indisponibilidades também é preservada em cada versão do cenário.
