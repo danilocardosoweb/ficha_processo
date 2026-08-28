@@ -107,15 +107,15 @@ export function BilletStockManager() {
         <Button className="h-10 bg-orange-600 px-4 text-white hover:bg-orange-700" onClick={() => setDraft(emptyDraft())}><Plus className="size-4" />Novo lote</Button>
       </header>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[960px] text-left text-sm">
-          <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3">Liga / lote</th><th className="px-4 py-3">Local</th><th className="px-4 py-3 text-right">kg/barra</th><th className="px-4 py-3 text-right">Físicas</th><th className="px-4 py-3 text-right">Reservadas</th><th className="px-4 py-3 text-right">Livres</th><th className="px-4 py-3">Status</th><th className="px-5 py-3 text-right">Ação</th></tr></thead>
+        <table className="w-full min-w-[1080px] text-left text-sm">
+          <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3">Liga / lote</th><th className="px-4 py-3">Local</th><th className="px-4 py-3 text-right">kg/barra</th><th className="px-4 py-3 text-right">Físicas</th><th className="px-4 py-3 text-right">Peso físico</th><th className="px-4 py-3 text-right">Reservadas</th><th className="px-4 py-3 text-right">Livres</th><th className="px-4 py-3 text-right">Peso livre</th><th className="px-4 py-3">Status</th><th className="px-5 py-3 text-right">Ação</th></tr></thead>
           <tbody>{filteredLots.length ? filteredLots.map((lot) => <tr key={lot.id} className="border-t hover:bg-orange-50/30">
             <td className="px-5 py-3"><strong className="font-mono text-orange-600">{lot.alloyCode}</strong><span className="block text-xs text-slate-500">Lote {lot.lotCode} · entrada {new Date(lot.receivedAt).toLocaleDateString("pt-BR")}</span></td>
             <td className="px-4 py-3 text-slate-600">{lot.location || "—"}</td><td className="px-4 py-3 text-right tabular-nums">{formatNumber(asNumber(lot.barWeightKg), 1)}</td>
-            <td className="px-4 py-3 text-right font-bold tabular-nums">{lot.totalBars}</td><td className="px-4 py-3 text-right font-bold tabular-nums text-amber-600">{lot.reservedBars}</td><td className="px-4 py-3 text-right text-lg font-black tabular-nums text-emerald-600">{lot.availableBars}</td>
+            <td className="px-4 py-3 text-right font-bold tabular-nums">{lot.totalBars}</td><td className="px-4 py-3 text-right font-bold tabular-nums">{formatNumber(lot.totalBars * asNumber(lot.barWeightKg), 0)} kg</td><td className="px-4 py-3 text-right font-bold tabular-nums text-amber-600">{lot.reservedBars}</td><td className="px-4 py-3 text-right text-lg font-black tabular-nums text-emerald-600">{lot.availableBars}</td><td className="px-4 py-3 text-right font-black tabular-nums text-blue-700">{formatNumber(lot.availableBars * asNumber(lot.barWeightKg), 0)} kg</td>
             <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ${statusClass[lot.status]}`}>{statusLabel[lot.status]}</span></td>
             <td className="px-5 py-3 text-right"><Button size="sm" variant="ghost" onClick={() => editLot(lot)}><Pencil className="size-4" />Editar</Button></td>
-          </tr>) : <tr><td colSpan={8} className="h-40 text-center text-sm text-slate-400">Nenhum lote encontrado.</td></tr>}</tbody>
+          </tr>) : <tr><td colSpan={10} className="h-40 text-center text-sm text-slate-400">Nenhum lote encontrado.</td></tr>}</tbody>
         </table>
       </div>
     </section>

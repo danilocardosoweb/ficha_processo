@@ -124,3 +124,10 @@ Interface
 - diagnósticos de segurança e desempenho executados; os avisos de RLS sem policy são esperados neste modelo, pois as tabelas permanecem sem acesso direto e as operações usam RPCs validadas por token local.
 - corrigidas seis funções AluPilot que consultavam `full_name`; o modelo local de usuários utiliza `display_name` como fonte única do nome do operador;
 - correção aplicada no Supabase e validada sem criar coluna duplicada ou alterar os usuários existentes.
+- carcaças passaram de recursos dedicados por prensa para um estoque físico único compartilhado pelas prensas 1.8 e 1.9;
+- a análise de carcaças agora compara o pico de usos simultâneos das duas prensas com a quantidade livre do estoque comum;
+- Furos e BO da Simplificada foram promovidos para colunas próprias das ordens, preservando também o arquivo original no histórico JSON;
+- a Carga Máquina passou a exibir Furos, BO e Carcaça em uma coluna de recursos visível por item;
+- a tela de tarugos passou a mostrar o peso físico e o peso livre em kg por lote, além da quantidade de barras;
+- modelo dos novos cenários atualizado para `alupilot-v1.1`;
+- foi identificado que as 27 ordens ativas possuem Furos e BO, porém ainda não possuem vínculo de carcaça nem ficha de processo correspondente; esse dado permanece explicitamente pendente, sem inferência automática insegura.

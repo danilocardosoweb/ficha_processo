@@ -5,7 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 
 const schema = z.object({
   id: z.string().uuid().nullable(),
-  machineCode: z.string().trim().min(1).max(20),
+  machineCode: z.string().trim().max(20).default("SHARED"),
   carcassCode: z.string().trim().min(1).max(50),
   totalQuantity: z.number().int().min(0).max(10_000),
   unavailableQuantity: z.number().int().min(0).max(10_000),

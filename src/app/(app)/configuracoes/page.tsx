@@ -8,7 +8,7 @@ const registrationCards = [
   { title: "Fichas de processo", description: "Receitas, parâmetros técnicos e sequências das ferramentas.", href: "/engenharia", icon: FileCog },
   { title: "Ferramentas", description: "Matrizes físicas, vida útil e histórico importado.", href: "/ferramentas", icon: Wrench },
   { title: "Estoque de tarugos", description: "Barras físicas, lotes, reservas e disponibilidade por liga.", href: "/configuracoes/tarugos", icon: PackageOpen },
-  { title: "Recursos das prensas", description: "Carcaças individuais, disponibilidade e vínculo por prensa.", href: "/configuracoes/recursos-prensa", icon: Boxes },
+  { title: "Carcaças compartilhadas", description: "Estoque único de carcaças utilizado pelas duas prensas.", href: "/configuracoes/recursos-prensa", icon: Boxes },
   { title: "Turnos e produção", description: "Horários, produtividade padrão e premissas da simulação.", href: "/configuracoes/producao", icon: Clock3 },
   { title: "Paradas e motivos", description: "Catálogo de ocorrências para Produção e Manutenção.", href: "/configuracoes/paradas", icon: CircleStop },
   { title: "Auditoria e conciliação", description: "Histórico imutável de setups, ações e confronto com os apontamentos da empresa.", href: "/configuracoes/auditoria", icon: History },

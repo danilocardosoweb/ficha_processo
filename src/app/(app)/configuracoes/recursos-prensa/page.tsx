@@ -5,7 +5,7 @@ import { requireAdmin } from "@/lib/local-auth/server";
 export default async function PressResourcesPage() {
   await requireAdmin();
   return <>
-    <PageHeading eyebrow="Capacidade operacional" title="Recursos das prensas" description="Cadastre carcaças individuais por prensa e acompanhe disponibilidade, manutenção e reservas." />
+    <PageHeading eyebrow="Capacidade operacional" title="Carcaças compartilhadas" description="Controle o estoque único de carcaças utilizado pelas duas prensas, incluindo disponibilidade, manutenção e reservas." />
     <PressResourcesManager />
   </>;
 }

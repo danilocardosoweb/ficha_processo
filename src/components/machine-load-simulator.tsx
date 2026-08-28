@@ -11,7 +11,8 @@ import { useCurrentUser } from "@/components/current-user-provider";
 interface RawOrder {
   id: string; order_number: string; plan_code: string | null; machine_code: string; tool_code: string; alloy_code: string | null;
   target_kg: number | string | null; produced_kg: number | string | null; sequence: number | null; due_date: string | null;
-  status: string; last_productivity_kg_h: number | string | null;
+  status: string; last_productivity_kg_h: number | string | null; holes: number | string | null; bo_code: string | null;
+  carcass_code: string | null; source_data: Record<string, unknown> | null;
 }
 interface RawSheet { tool_code: string; machine_code: string | null; parameters: Record<string, unknown> | null; }
 interface RawTool { code: string; matrix_code: string | null; productivity_kg_h: string | null; holes: number | null; bo: string | null; }
@@ -22,13 +23,14 @@ interface RawCycleOrder { production_order_id: string; tool_heating_cycles: { st
 interface RawAlloy { tool_code: string; alloy_code: string; is_primary: boolean; }
 interface BilletStockSummary { alloyCode: string; lotCount: number; totalBars: number; reservedBars: number; availableBars: number; totalWeightKg: number | string; availableWeightKg: number | string; }
 interface BilletStockPayload { summary: BilletStockSummary[]; }
-interface CarcassResource { id: string; machineCode: string; carcassCode: string; totalQuantity: number; unavailableQuantity: number; reservedQuantity: number; availableQuantity: number; status: "available" | "maintenance" | "blocked" | "inactive"; location: string | null; }
+interface CarcassResource { id: string; machineCode: string; sharedAcrossMachines?: boolean; carcassCode: string; totalQuantity: number; unavailableQuantity: number; reservedQuantity: number; availableQuantity: number; status: "available" | "maintenance" | "blocked" | "inactive"; location: string | null; }
 interface RawUnavailability { id: string; resourceType: ResourceUnavailabilityInput["resourceType"]; resourceCode: string; startsAt: string; endsAt: string; reason: string; status: ResourceUnavailabilityInput["status"]; }
 interface ScenarioSummary { id: string; name: string; description: string | null; status: string; currentVersion: number; requestedStartAt: string | null; createdAt: string; updatedAt: string; createdBy: string | null; }
 interface LoadedScenario { scenarioId: string; name: string; description: string | null; versionNumber: number; mode: "fifo" | "optimized" | "manual"; requestedStartAt: string; inputs?: { selectedMachine?: string }; rules?: { unavailability?: ResourceUnavailabilityInput[]; billetStock?: { capturedAt?: string; summary?: BilletStockSummary[] }; carcassResources?: { capturedAt?: string; items?: CarcassResource[] } }; result: ReturnType<typeof simulateMachineLoad>; createdAt: string; }
 
 const defaultSettings: MachineLoadSettings = { billetBarWeightKg: 415, extrusionEfficiency: 0.85, defaultProductivityKgH: 1000, setupMinutes: 20, alloyChangeMinutes: 15, toolHeatingMinutes: 240, ovenSlots: 21 };
 const numberValue = (value: unknown) => typeof value === "number" ? value : Number(String(value ?? "").replace(/\./g, "").replace(",", ".")) || 0;
+const textValue = (...values: unknown[]) => values.map((value) => typeof value === "string" || typeof value === "number" ? String(value).trim() : "").find(Boolean) ?? "";
 const formatNumber = (value: number, digits = 1) => value.toLocaleString("pt-BR", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const formatDuration = (minutes: number) => `${Math.floor(minutes / 60)}h ${String(Math.round(minutes % 60)).padStart(2, "0")}min`;
 const formatDateTime = (date: Date | null) => date ? date.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
@@ -89,7 +91,7 @@ export function MachineLoadSimulator() {
       if (!organizationId) throw new Error("Organização padrão não configurada.");
       const supabase = createClient();
       const [ordersResult, sheetsResult, toolsResult, cyclesResult, alloysResult, productionSettingsResponse, billetStockResponse, carcassResponse, calendarResponse] = await Promise.all([
-        supabase.from("production_orders").select("id,order_number,plan_code,machine_code,tool_code,alloy_code,target_kg,produced_kg,sequence,due_date,status,last_productivity_kg_h").eq("organization_id", organizationId).eq("is_active", true).in("status", ["planned", "released", "in_progress", "paused"]).order("machine_code").order("sequence"),
+        supabase.from("production_orders").select("id,order_number,plan_code,machine_code,tool_code,alloy_code,target_kg,produced_kg,sequence,due_date,status,last_productivity_kg_h,holes,bo_code,carcass_code,source_data").eq("organization_id", organizationId).eq("is_active", true).in("status", ["planned", "released", "in_progress", "paused"]).order("machine_code").order("sequence"),
         supabase.from("process_sheets").select("tool_code,machine_code,parameters").eq("organization_id", organizationId).eq("is_active", true),
         supabase.from("tools").select("code,matrix_code,productivity_kg_h,holes,bo").eq("organization_id", organizationId),
         supabase.from("tool_heating_cycle_orders").select("production_order_id,tool_heating_cycles!inner(status,expected_ready_at,released_at,organization_id)").eq("tool_heating_cycles.organization_id", organizationId).in("tool_heating_cycles.status", ["heating", "released"]),
@@ -127,12 +129,13 @@ export function MachineLoadSimulator() {
         const tool = rawTools.find((item) => [item.code, item.matrix_code].filter(Boolean).some((code) => code!.toUpperCase() === order.tool_code.toUpperCase()));
         const sheetExtrusion = nestedRecord(sheet?.parameters ?? null, "extrusion");
         const sheetBillet = nestedRecord(sheet?.parameters ?? null, "billet");
+        const sourceData = order.source_data ?? {};
         const sources: Array<[number, ProductivitySource]> = [[numberValue(order.last_productivity_kg_h), "simplificada"], [readSheetProductivity(sheet?.parameters ?? null), "ficha"], [numberValue(tool?.productivity_kg_h), "ferramenta"], [settingMap[order.machine_code]?.defaultProductivityKgH ?? 1000, "padrao"]];
         const productivity = sources.find(([value]) => value > 0) ?? [1000, "padrao" as const];
         const cycle = rawCycles.find((item) => item.production_order_id === order.id)?.tool_heating_cycles;
         const toolHeatingState = cycle?.status === "released" ? "released" : cycle?.status === "heating" ? "heating" : "waiting";
         const toolReadyAt = cycle?.status === "released" ? new Date() : cycle?.expected_ready_at ? new Date(cycle.expected_ready_at) : null;
-        return { id: order.id, orderNumber: order.order_number, planCode: order.plan_code ?? "—", machineCode: order.machine_code, toolCode: order.tool_code, alloyCode: order.alloy_code ?? "SEM LIGA", alternativeAlloys: rawAlloys.filter((item) => item.tool_code.toUpperCase() === order.tool_code.toUpperCase() && !item.is_primary).map((item) => item.alloy_code), targetKg: numberValue(order.target_kg), producedKg: numberValue(order.produced_kg), sequence: order.sequence ?? 9999, dueDate: order.due_date, status: order.status, productivityKgH: productivity[0] as number, productivitySource: productivity[1] as ProductivitySource, toolReadyAt, toolHeatingState, holes: numberValue(sheetExtrusion.holes) || tool?.holes || null, boCode: tool?.bo?.trim() || null, carcassCode: String(sheetBillet.casing ?? "").trim() || null } satisfies LoadOrderInput;
+        return { id: order.id, orderNumber: order.order_number, planCode: order.plan_code ?? "—", machineCode: order.machine_code, toolCode: order.tool_code, alloyCode: order.alloy_code ?? "SEM LIGA", alternativeAlloys: rawAlloys.filter((item) => item.tool_code.toUpperCase() === order.tool_code.toUpperCase() && !item.is_primary).map((item) => item.alloy_code), targetKg: numberValue(order.target_kg), producedKg: numberValue(order.produced_kg), sequence: order.sequence ?? 9999, dueDate: order.due_date, status: order.status, productivityKgH: productivity[0] as number, productivitySource: productivity[1] as ProductivitySource, toolReadyAt, toolHeatingState, holes: numberValue(order.holes) || numberValue(sourceData.furos) || numberValue(sheetExtrusion.holes) || tool?.holes || null, boCode: textValue(order.bo_code, sourceData.bo, tool?.bo) || null, carcassCode: textValue(order.carcass_code, sourceData.carcaca, sourceData.carcassCode, sheetBillet.casing) || null } satisfies LoadOrderInput;
       });
       setOrders(input); setSettings(settingMap);
       setShifts((productionSettings.shifts ?? []).map((shift) => ({ id: shift.id, code: shift.code, name: shift.name, startTime: shift.start_time.slice(0, 5), endTime: shift.end_time.slice(0, 5), breakMinutes: shift.break_minutes, machineCodes: shift.machine_codes ?? [], isActive: shift.is_active })));
@@ -409,15 +412,37 @@ function PressResourceWarnings({ machines, resources, available }: { machines: R
   const missingHoles = items.filter((item) => !item.holes).length;
   const missingBo = items.filter((item) => !item.boCode).length;
   const missingCarcass = items.filter((item) => !item.carcassCode).length;
-  const requirements = [...new Map(items.filter((item) => item.carcassCode).map((item) => [`${item.machineCode}|${item.carcassCode!.trim().toUpperCase()}`, { machineCode: item.machineCode, carcassCode: item.carcassCode! }])).values()];
-  const unavailable = available ? requirements.filter((requirement) => {
-    const resource = resources.find((item) => item.machineCode === requirement.machineCode && item.carcassCode.trim().toUpperCase() === requirement.carcassCode.trim().toUpperCase());
-    return !resource || resource.availableQuantity < 1;
-  }) : [];
   const hasIncompleteData = missingHoles > 0 || missingBo > 0 || missingCarcass > 0;
+  const resourceByCode = resources.reduce<Map<string, number>>((result, resource) => {
+    const code = resource.carcassCode.trim().toUpperCase();
+    result.set(code, (result.get(code) ?? 0) + resource.availableQuantity);
+    return result;
+  }, new Map());
+  const scheduledByCode = items.reduce<Map<string, typeof items>>((result, item) => {
+    const code = item.carcassCode?.trim().toUpperCase();
+    if (code) result.set(code, [...(result.get(code) ?? []), item]);
+    return result;
+  }, new Map());
+  const conflicts = available ? [...scheduledByCode.entries()].flatMap(([code, scheduled]) => {
+    const free = resourceByCode.get(code) ?? 0;
+    const events = scheduled.flatMap((item) => [
+      { time: item.startAt.getTime(), change: 1 },
+      { time: item.endAt.getTime(), change: -1 },
+    ]).sort((left, right) => left.time - right.time || left.change - right.change);
+    let concurrent = 0;
+    let peak = 0;
+    let firstConflictAt: number | null = null;
+    for (const event of events) {
+      concurrent += event.change;
+      peak = Math.max(peak, concurrent);
+      if (concurrent > free && firstConflictAt === null) firstConflictAt = event.time;
+    }
+    return peak > free ? [{ code, free, peak, firstConflictAt }] : [];
+  }) : [];
+
   if (!available) return <div className="flex flex-wrap items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-800"><Boxes className="size-4 shrink-0" /><p className="flex-1"><strong>Disponibilidade de carcaças ainda não ativada.</strong> Furos, BO e carcaça já são registrados no cenário, porém a capacidade física ainda não pode ser confirmada.</p></div>;
-  if (unavailable.length) return <section className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-900"><div className="flex items-start gap-2"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-red-600" /><div><p className="font-black">Risco de recurso físico indisponível</p>{unavailable.map((item) => <p key={`${item.machineCode}-${item.carcassCode}`} className="mt-1">{machineLabel(item.machineCode)} precisa da carcaça <strong>{item.carcassCode}</strong>, mas não há unidade livre cadastrada.</p>)}{hasIncompleteData ? <p className="mt-2 text-red-700">Dados incompletos: {missingHoles} item(ns) sem furos, {missingBo} sem BO e {missingCarcass} sem carcaça.</p> : null}</div></div></section>;
-  return <div className={`flex items-center gap-2 rounded-xl border px-4 py-3 text-xs ${hasIncompleteData ? "border-amber-200 bg-amber-50 text-amber-900" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}><Boxes className="size-4 shrink-0" /><p><strong>{hasIncompleteData ? "Recursos cobertos, com cadastros incompletos." : "Carcaças cobertas."}</strong> {hasIncompleteData ? `${missingHoles} item(ns) sem furos, ${missingBo} sem BO e ${missingCarcass} sem carcaça.` : "Todas as carcaças informadas possuem unidade livre na prensa correta; Furos e BO permanecem rastreados no cenário."}</p></div>;
+  if (conflicts.length) return <section className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-900"><div className="flex items-start gap-2"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-red-600" /><div><p className="font-black">Risco no estoque compartilhado de carcaças</p>{conflicts.map((item) => <p key={item.code} className="mt-1">Carcaça <strong>{item.code}</strong>: a simulação exige até {item.peak} unidade(s) ao mesmo tempo, mas há {item.free} livre(s){item.firstConflictAt ? ` a partir de ${formatDateTime(new Date(item.firstConflictAt))}` : ""}.</p>)}<p className="mt-2 text-red-700">Como o estoque atende às duas prensas, o mesmo saldo não pode ser usado simultaneamente.</p>{hasIncompleteData ? <p className="mt-1 text-red-700">Dados incompletos: {missingHoles} item(ns) sem furos, {missingBo} sem BO e {missingCarcass} sem carcaça.</p> : null}</div></div></section>;
+  return <div className={`flex items-center gap-2 rounded-xl border px-4 py-3 text-xs ${hasIncompleteData ? "border-amber-200 bg-amber-50 text-amber-900" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}><Boxes className="size-4 shrink-0" /><p><strong>{hasIncompleteData ? "Estoque compartilhado coberto, com dados incompletos." : "Carcaças compartilhadas cobertas."}</strong> {hasIncompleteData ? `${missingHoles} item(ns) sem furos, ${missingBo} sem BO e ${missingCarcass} sem carcaça.` : "A quantidade livre atende aos picos simultâneos das duas prensas; Furos e BO também estão rastreados."}</p></div>;
 }
 
 function OperationalCalendarPanel({ periods, machines }: { periods: ResourceUnavailabilityInput[]; machines: string[] }) {
@@ -445,9 +470,9 @@ function Timeline({ machines, manual, onMove }: {
         <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold text-slate-600">realista {formatDuration(machine.simulatedMinutes)}</span>
       </div>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[1260px] text-left text-xs">
+        <table className="w-full min-w-[1420px] text-left text-xs">
           <thead className="bg-slate-50 text-[9px] uppercase tracking-wide text-slate-500">
-            <tr><th className="px-3 py-2"># / Ferramenta</th><th className="px-3 py-2">Plano</th><th className="px-3 py-2">Pedido / ordem</th><th className="px-3 py-2">Qtd. pedida</th><th className="px-3 py-2">Saldo do pedido</th><th className="px-3 py-2">Preparação</th><th className="px-3 py-2">Início</th><th className="px-3 py-2">Duração</th><th className="px-3 py-2">Fim</th><th className="px-3 py-2">Produtividade</th><th className="px-3 py-2">Liga / barras</th><th className="px-3 py-2 text-right">Saldo de tarugo</th></tr>
+            <tr><th className="px-3 py-2"># / Ferramenta</th><th className="px-3 py-2">Recursos</th><th className="px-3 py-2">Plano</th><th className="px-3 py-2">Pedido / ordem</th><th className="px-3 py-2">Qtd. pedida</th><th className="px-3 py-2">Saldo do pedido</th><th className="px-3 py-2">Preparação</th><th className="px-3 py-2">Início</th><th className="px-3 py-2">Duração</th><th className="px-3 py-2">Fim</th><th className="px-3 py-2">Produtividade</th><th className="px-3 py-2">Liga / barras</th><th className="px-3 py-2 text-right">Saldo de tarugo</th></tr>
           </thead>
           <tbody>{machine.items.map((item, index) => <tr
             key={item.id}
@@ -475,7 +500,8 @@ function Timeline({ machines, manual, onMove }: {
             onDragEnd={() => { setDraggedId(null); setOverId(null); }}
             className={`border-t transition ${manual ? "cursor-grab active:cursor-grabbing" : ""} ${draggedId === item.id ? "opacity-40" : ""} ${overId === item.id ? "bg-orange-100 ring-2 ring-inset ring-orange-400" : "hover:bg-orange-50/30"}`}
           >
-            <td className="px-3 py-2.5"><span className="inline-flex items-center"><span className="mr-2 text-slate-400">{String(index + 1).padStart(2, "0")}</span>{manual && <GripVertical className="mr-2 size-4 text-orange-500" aria-label={`Arrastar ${item.toolCode}`} />}<strong className="font-mono text-orange-600">{item.toolCode}</strong></span><span className="mt-1 block pl-6 text-[9px] text-slate-400">{item.holes ? `${item.holes} furo(s)` : "Furos não informados"}{item.boCode ? ` · BO ${item.boCode}` : ""}{item.carcassCode ? ` · carcaça ${item.carcassCode}` : ""}</span></td>
+            <td className="px-3 py-2.5"><span className="inline-flex items-center"><span className="mr-2 text-slate-400">{String(index + 1).padStart(2, "0")}</span>{manual && <GripVertical className="mr-2 size-4 text-orange-500" aria-label={`Arrastar ${item.toolCode}`} />}<strong className="font-mono text-orange-600">{item.toolCode}</strong></span></td>
+            <td className="px-3 py-2.5"><div className="flex min-w-36 flex-wrap gap-1"><ResourceChip label="Furos" value={item.holes ? String(item.holes) : "—"} missing={!item.holes} /><ResourceChip label="BO" value={item.boCode || "—"} missing={!item.boCode} /><ResourceChip label="Carcaça" value={item.carcassCode || "—"} missing={!item.carcassCode} /></div></td>
             <td className="px-3 py-2.5 font-bold">{item.planCode}</td>
             <td className="px-3 py-2.5 font-mono font-bold text-slate-700">{item.orderNumber}</td>
             <td className="px-3 py-2.5 font-bold tabular-nums">{formatNumber(item.targetKg)} kg</td>
@@ -493,14 +519,18 @@ function Timeline({ machines, manual, onMove }: {
     </div>)}
   </div>;
 }
+function ResourceChip({ label, value, missing }: { label: string; value: string; missing: boolean }) {
+  return <span className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-1 text-[9px] font-bold ${missing ? "border-amber-200 bg-amber-50 text-amber-700" : "border-slate-200 bg-slate-50 text-slate-700"}`}><span className="uppercase text-slate-400">{label}</span>{value}</span>;
+}
 function BilletTable({ billets, settings, stock, available }: { billets: ReturnType<typeof simulateMachineLoad>["billets"]; settings: Record<string, MachineLoadSettings>; stock: BilletStockSummary[]; available: boolean }) {
   const base = Object.values(settings)[0] ?? defaultSettings;
   return <div><div className="grid gap-3 border-b bg-slate-50/70 p-4 sm:grid-cols-3"><Compact label="Peso padrão da barra" value={`${formatNumber(base.billetBarWeightKg, 0)} kg`} /><Compact label="Eficiência" value={`${formatNumber(base.extrusionEfficiency * 100, 0)}%`} /><Compact label="Produto útil / barra" value={`${formatNumber(base.billetBarWeightKg * base.extrusionEfficiency, 2)} kg`} /></div><div className="overflow-x-auto"><table className="w-full min-w-[1040px] text-sm"><thead className="text-left text-[10px] uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Liga</th><th className="px-4 py-3 text-right">Demanda programada</th><th className="px-4 py-3 text-right">Tarugo teórico</th><th className="px-4 py-3 text-right">Barras necessárias</th><th className="px-4 py-3 text-right">Carga calculada</th><th className="px-4 py-3 text-right">Estoque físico livre</th><th className="px-4 py-3 text-right">Cobertura</th><th className="px-4 py-3 text-right">Saldo após carga</th><th className="px-4 py-3 text-right">Sobra no processo</th></tr></thead><tbody>{billets.map((row) => {
     const stockRow = stock.find((item) => item.alloyCode.trim().toUpperCase() === row.alloyCode.trim().toUpperCase());
     const availableBars = stockRow?.availableBars ?? 0;
+    const availableWeightKg = numberValue(stockRow?.availableWeightKg);
     const balance = availableBars - row.bars;
     const coverage = row.bars > 0 ? Math.min((availableBars / row.bars) * 100, 100) : 100;
-    return <tr key={row.alloyCode} className="border-t"><td className="px-4 py-3 font-mono font-black text-orange-600">{row.alloyCode}</td><td className="px-4 py-3 text-right font-bold">{formatNumber(row.demandKg)} kg</td><td className="px-4 py-3 text-right">{formatNumber(row.rawRequiredKg)} kg</td><td className="px-4 py-3 text-right text-lg font-black">{row.bars}</td><td className="px-4 py-3 text-right">{formatNumber(row.loadedKg)} kg</td><td className="px-4 py-3 text-right font-bold">{available ? `${availableBars} barra(s)` : "Não informado"}</td><td className={`px-4 py-3 text-right font-black ${available && coverage < 100 ? "text-red-600" : "text-emerald-600"}`}>{available ? `${formatNumber(coverage, 0)}%` : "—"}</td><td className={`px-4 py-3 text-right font-black ${balance < 0 ? "text-red-600" : "text-emerald-600"}`}>{available ? `${balance >= 0 ? "+" : ""}${balance} barra(s)` : "—"}</td><td className="px-4 py-3 text-right font-bold text-violet-700">{formatNumber(row.endingBalanceKg)} kg</td></tr>;
+    return <tr key={row.alloyCode} className="border-t"><td className="px-4 py-3 font-mono font-black text-orange-600">{row.alloyCode}</td><td className="px-4 py-3 text-right font-bold">{formatNumber(row.demandKg)} kg</td><td className="px-4 py-3 text-right">{formatNumber(row.rawRequiredKg)} kg</td><td className="px-4 py-3 text-right text-lg font-black">{row.bars}</td><td className="px-4 py-3 text-right">{formatNumber(row.loadedKg)} kg</td><td className="px-4 py-3 text-right font-bold">{available ? <><span>{availableBars} barra(s)</span><span className="block text-[10px] font-semibold text-slate-500">{formatNumber(availableWeightKg, 0)} kg livres</span></> : "Não informado"}</td><td className={`px-4 py-3 text-right font-black ${available && coverage < 100 ? "text-red-600" : "text-emerald-600"}`}>{available ? `${formatNumber(coverage, 0)}%` : "—"}</td><td className={`px-4 py-3 text-right font-black ${balance < 0 ? "text-red-600" : "text-emerald-600"}`}>{available ? `${balance >= 0 ? "+" : ""}${balance} barra(s)` : "—"}</td><td className="px-4 py-3 text-right font-bold text-violet-700">{formatNumber(row.endingBalanceKg)} kg</td></tr>;
   })}</tbody></table></div></div>;
 }
 

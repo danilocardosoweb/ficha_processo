@@ -554,6 +554,8 @@ export function SimplifiedImport() {
             status: "planned",
             requires_tool_heating: true,
             last_productivity_kg_h: row.ultimaProdutividadeKgH || null,
+            holes: row.furos && row.furos > 0 ? Math.round(row.furos) : null,
+            bo_code: row.bo || null,
             notes: row.observacao || null,
             source_data: {
               ...row,
@@ -740,6 +742,7 @@ export function SimplifiedImport() {
                     "Item / Seq.",
                     "Prensa",
                     "Ferramenta",
+                    "Furos / BO",
                     "Cliente / observação",
                     "Liga",
                     "Demanda",
@@ -782,6 +785,9 @@ export function SimplifiedImport() {
                     <td className="px-3 font-semibold">{row.prensa}</td>
                     <td className="px-3 font-mono font-semibold text-orange-600">
                       {row.ferramenta}
+                    </td>
+                    <td className="px-3 font-semibold">
+                      {row.furos ? `${row.furos} furo(s)` : "Furos —"} · {row.bo ? `BO ${row.bo}` : "BO —"}
                     </td>
                     <td
                       className="max-w-64 truncate px-3"
