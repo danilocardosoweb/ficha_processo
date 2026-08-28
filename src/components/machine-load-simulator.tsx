@@ -20,8 +20,10 @@ interface RawShift { id: string; code: string; name: string; start_time: string;
 interface ProductionSettingsPayload { settings: RawSetting[]; shifts: RawShift[]; }
 interface RawCycleOrder { production_order_id: string; tool_heating_cycles: { status: string; expected_ready_at: string | null; released_at: string | null } | null; }
 interface RawAlloy { tool_code: string; alloy_code: string; is_primary: boolean; }
+interface BilletStockSummary { alloyCode: string; lotCount: number; totalBars: number; reservedBars: number; availableBars: number; totalWeightKg: number | string; availableWeightKg: number | string; }
+interface BilletStockPayload { summary: BilletStockSummary[]; }
 interface ScenarioSummary { id: string; name: string; description: string | null; status: string; currentVersion: number; requestedStartAt: string | null; createdAt: string; updatedAt: string; createdBy: string | null; }
-interface LoadedScenario { scenarioId: string; name: string; description: string | null; versionNumber: number; mode: "fifo" | "optimized" | "manual"; requestedStartAt: string; inputs?: { selectedMachine?: string }; result: ReturnType<typeof simulateMachineLoad>; createdAt: string; }
+interface LoadedScenario { scenarioId: string; name: string; description: string | null; versionNumber: number; mode: "fifo" | "optimized" | "manual"; requestedStartAt: string; inputs?: { selectedMachine?: string }; rules?: { billetStock?: { capturedAt?: string; summary?: BilletStockSummary[] } }; result: ReturnType<typeof simulateMachineLoad>; createdAt: string; }
 
 const defaultSettings: MachineLoadSettings = { billetBarWeightKg: 415, extrusionEfficiency: 0.85, defaultProductivityKgH: 1000, setupMinutes: 20, alloyChangeMinutes: 15, toolHeatingMinutes: 240, ovenSlots: 21 };
 const numberValue = (value: unknown) => typeof value === "number" ? value : Number(String(value ?? "").replace(/\./g, "").replace(",", ".")) || 0;
@@ -49,6 +51,8 @@ export function MachineLoadSimulator() {
   const [orders, setOrders] = useState<LoadOrderInput[]>([]);
   const [settings, setSettings] = useState<Record<string, MachineLoadSettings>>({});
   const [shifts, setShifts] = useState<WorkShiftInput[]>([]);
+  const [billetStock, setBilletStock] = useState<BilletStockSummary[]>([]);
+  const [billetStockAvailable, setBilletStockAvailable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [mode, setMode] = useState<"fifo" | "optimized" | "manual">("optimized");
@@ -74,18 +78,22 @@ export function MachineLoadSimulator() {
       const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
       if (!organizationId) throw new Error("Organização padrão não configurada.");
       const supabase = createClient();
-      const [ordersResult, sheetsResult, toolsResult, cyclesResult, alloysResult, productionSettingsResponse] = await Promise.all([
+      const [ordersResult, sheetsResult, toolsResult, cyclesResult, alloysResult, productionSettingsResponse, billetStockResponse] = await Promise.all([
         supabase.from("production_orders").select("id,order_number,plan_code,machine_code,tool_code,alloy_code,target_kg,produced_kg,sequence,due_date,status,last_productivity_kg_h").eq("organization_id", organizationId).eq("is_active", true).in("status", ["planned", "released", "in_progress", "paused"]).order("machine_code").order("sequence"),
         supabase.from("process_sheets").select("tool_code,machine_code,parameters").eq("organization_id", organizationId).eq("is_active", true),
         supabase.from("tools").select("code,matrix_code,productivity_kg_h").eq("organization_id", organizationId),
         supabase.from("tool_heating_cycle_orders").select("production_order_id,tool_heating_cycles!inner(status,expected_ready_at,released_at,organization_id)").eq("tool_heating_cycles.organization_id", organizationId).in("tool_heating_cycles.status", ["heating", "released"]),
         supabase.from("tool_alloy_options").select("tool_code,alloy_code,is_primary").eq("organization_id", organizationId).eq("is_active", true).order("priority"),
         fetch("/api/production-settings", { cache: "no-store" }),
+        fetch("/api/billet-stock", { cache: "no-store" }),
       ]);
       const firstError = [ordersResult.error, sheetsResult.error, toolsResult.error, cyclesResult.error, alloysResult.error].find(Boolean);
       if (firstError) throw firstError;
       const productionSettings = await productionSettingsResponse.json().catch(() => ({})) as ProductionSettingsPayload & { error?: string };
       if (!productionSettingsResponse.ok) throw new Error(productionSettings.error || "Não foi possível carregar os turnos de produção.");
+      const stockPayload = await billetStockResponse.json().catch(() => null) as BilletStockPayload | null;
+      setBilletStock(billetStockResponse.ok ? stockPayload?.summary ?? [] : []);
+      setBilletStockAvailable(billetStockResponse.ok);
       const rawOrders = (ordersResult.data ?? []) as RawOrder[];
       const rawSheets = (sheetsResult.data ?? []) as RawSheet[];
       const rawTools = (toolsResult.data ?? []) as RawTool[];
@@ -181,7 +189,7 @@ export function MachineLoadSimulator() {
           scenarioId, name: scenarioName, description: scenarioDescription, machineCode: machine,
           mode, requestedStartAt: startedAt.toISOString(),
           inputSnapshot: { selectedMachine: machine, manualOrder, orders: orderedVisibleOrders },
-          rulesSnapshot: { modelVersion: SIMULATION_MODEL_VERSION, settingsByMachine: settings, shifts },
+          rulesSnapshot: { modelVersion: SIMULATION_MODEL_VERSION, settingsByMachine: settings, shifts, billetStock: { capturedAt: new Date().toISOString(), summary: billetStock } },
           resultSnapshot: simulationState.simulation,
         }),
       });
@@ -200,6 +208,8 @@ export function MachineLoadSimulator() {
   const simulation = historicalScenario?.result ?? simulationState.simulation;
   if (!simulation) return null;
   const simulatedMachines = simulation.machines;
+  const displayedBilletStock = historicalScenario ? historicalScenario.rules?.billetStock?.summary ?? [] : billetStock;
+  const hasBilletStockSnapshot = historicalScenario ? !!historicalScenario.rules?.billetStock : billetStockAvailable;
   const estimatedEnd = simulation.machines.reduce<Date | null>((latest, item) => !item.endsAt ? latest : !latest || item.endsAt > latest ? item.endsAt : latest, null);
   function activateManualMode() {
     if (mode !== "manual") {
@@ -262,12 +272,13 @@ export function MachineLoadSimulator() {
     </section>
     <ThermalCoveragePanel machines={simulation.machines} />
     <AlloyWarnings machines={simulation.machines} />
+    <BilletStockWarnings billets={simulation.billets} stock={displayedBilletStock} available={hasBilletStockSnapshot} />
 
     <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
       <div className="flex items-center justify-between border-b px-4 py-3"><div><h2 className="font-heading font-bold text-slate-900">Simulação operacional</h2><p className="text-xs text-slate-500">Prensa + ferramenta/forno + tarugo/liga.</p></div><div className="flex rounded-xl bg-slate-100 p-1"><button type="button" onClick={() => setTab("timeline")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "timeline" ? "bg-white shadow-sm" : "text-slate-500"}`}><Clock3 className="mr-1 inline size-3.5" />Linha do tempo</button><button type="button" onClick={() => setTab("billets")} className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "billets" ? "bg-white shadow-sm" : "text-slate-500"}`}><PackageOpen className="mr-1 inline size-3.5" />Carga de tarugo</button></div></div>
-      {tab === "timeline" ? <Timeline machines={simulation.machines} manual={!historicalScenario && mode === "manual"} onMove={moveManualOrder} /> : <BilletTable billets={simulation.billets} settings={settings} />}
+      {tab === "timeline" ? <Timeline machines={simulation.machines} manual={!historicalScenario && mode === "manual"} onMove={moveManualOrder} /> : <BilletTable billets={simulation.billets} settings={settings} stock={displayedBilletStock} available={hasBilletStockSnapshot} />}
     </section>
-    <div className="flex items-start gap-2 rounded-xl bg-blue-50 px-4 py-3 text-xs text-blue-800"><Settings2 className="mt-0.5 size-4 shrink-0" /><p><strong>Premissas da V1:</strong> barra de 415 kg, eficiência de 85% e 21 vagas por prensa. As 4 h são a regra operacional cadastrada e a cobertura térmica respeita os turnos. Estoque físico ainda é apresentado como carga necessária.</p></div>
+    <div className="flex items-start gap-2 rounded-xl bg-blue-50 px-4 py-3 text-xs text-blue-800"><Settings2 className="mt-0.5 size-4 shrink-0" /><p><strong>Premissas atuais:</strong> peso e eficiência seguem a configuração de cada prensa; os fornos usam 21 vagas por prensa e a regra térmica cadastrada. A carga necessária agora é comparada ao estoque físico livre, já descontadas as reservas ativas.</p></div>
     {scenarioPanel ? <ScenarioDialog mode={scenarioPanel} name={scenarioName} description={scenarioDescription} scenarios={scenarios} busy={scenarioBusy} error={scenarioError} scenarioId={scenarioId} onName={setScenarioName} onDescription={setScenarioDescription} onClose={() => { setScenarioPanel(null); setScenarioError(""); }} onSave={() => void saveScenario()} onOpen={(id) => void openSavedScenario(id)} /> : null}
   </div>;
 }
@@ -358,6 +369,17 @@ function AlloyWarnings({ machines }: { machines: ReturnType<typeof simulateMachi
   return <section className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-950"><div className="flex items-start gap-2"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-600" /><div><p className="font-bold">Atenção ao consumo de tarugo antes da troca de liga</p><div className="mt-1 space-y-1">{transitions.map((transition) => <p key={`${transition.machine}-${transition.from}-${transition.to}`}>Prensa {transition.machine}: sobram <strong>{formatNumber(transition.balance)} kg de {transition.from}</strong> antes de {transition.to}. {transition.accepted ? "A próxima ferramenta aceita essa liga como alternativa; confirme o uso." : "As ligas são incompatíveis: reordene a sequência ou distribua o saldo antes da virada."}</p>)}</div></div></div></section>;
 }
 
+function BilletStockWarnings({ billets, stock, available }: { billets: ReturnType<typeof simulateMachineLoad>["billets"]; stock: BilletStockSummary[]; available: boolean }) {
+  if (!available) return <div className="flex flex-wrap items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-800"><PackageOpen className="size-4 shrink-0" /><p className="flex-1"><strong>Estoque físico ainda não ativado.</strong> A simulação continua calculando a necessidade, mas não pode confirmar a disponibilidade.</p><a href="/configuracoes/tarugos" className="rounded-lg bg-blue-700 px-3 py-2 font-bold text-white">Cadastrar estoque</a></div>;
+  const shortages = billets.flatMap((row) => {
+    const stocked = stock.find((item) => item.alloyCode.trim().toUpperCase() === row.alloyCode.trim().toUpperCase());
+    const availableBars = stocked?.availableBars ?? 0;
+    return availableBars < row.bars ? [{ alloyCode: row.alloyCode, required: row.bars, available: availableBars, shortage: row.bars - availableBars }] : [];
+  });
+  if (!shortages.length) return <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-800"><PackageOpen className="size-4" /><p><strong>Tarugos cobertos.</strong> Há estoque livre suficiente para todas as ligas desta simulação.</p></div>;
+  return <section className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-900"><div className="flex items-start gap-2"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-red-600" /><div><p className="font-black">Risco de parada por falta de tarugo</p><div className="mt-1 space-y-1">{shortages.map((item) => <p key={item.alloyCode}>Liga <strong>{item.alloyCode}</strong>: precisa de {item.required} barra(s), possui {item.available} livre(s) e faltam <strong>{item.shortage}</strong>.</p>)}</div></div></div></section>;
+}
+
 function Timeline({ machines, manual, onMove }: {
   machines: ReturnType<typeof simulateMachineLoad>["machines"];
   manual: boolean;
@@ -425,9 +447,15 @@ function Timeline({ machines, manual, onMove }: {
     </div>)}
   </div>;
 }
-function BilletTable({ billets, settings }: { billets: ReturnType<typeof simulateMachineLoad>["billets"]; settings: Record<string, MachineLoadSettings> }) {
+function BilletTable({ billets, settings, stock, available }: { billets: ReturnType<typeof simulateMachineLoad>["billets"]; settings: Record<string, MachineLoadSettings>; stock: BilletStockSummary[]; available: boolean }) {
   const base = Object.values(settings)[0] ?? defaultSettings;
-  return <div><div className="grid gap-3 border-b bg-slate-50/70 p-4 sm:grid-cols-3"><Compact label="Peso da barra" value={`${formatNumber(base.billetBarWeightKg, 0)} kg`} /><Compact label="Eficiência" value={`${formatNumber(base.extrusionEfficiency * 100, 0)}%`} /><Compact label="Produto útil / barra" value={`${formatNumber(base.billetBarWeightKg * base.extrusionEfficiency, 2)} kg`} /></div><div className="overflow-x-auto"><table className="w-full min-w-[760px] text-sm"><thead className="text-left text-[10px] uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Liga</th><th className="px-4 py-3 text-right">Demanda programada</th><th className="px-4 py-3 text-right">Tarugo teórico</th><th className="px-4 py-3 text-right">Barras</th><th className="px-4 py-3 text-right">Carga disponível</th><th className="px-4 py-3 text-right">Saldo final estimado</th></tr></thead><tbody>{billets.map((row) => <tr key={row.alloyCode} className="border-t"><td className="px-4 py-3 font-mono font-black text-orange-600">{row.alloyCode}</td><td className="px-4 py-3 text-right font-bold">{formatNumber(row.demandKg)} kg</td><td className="px-4 py-3 text-right">{formatNumber(row.rawRequiredKg)} kg</td><td className="px-4 py-3 text-right text-lg font-black">{row.bars}</td><td className="px-4 py-3 text-right">{formatNumber(row.loadedKg)} kg</td><td className="px-4 py-3 text-right font-bold text-emerald-600">{formatNumber(row.endingBalanceKg)} kg</td></tr>)}</tbody></table></div></div>;
+  return <div><div className="grid gap-3 border-b bg-slate-50/70 p-4 sm:grid-cols-3"><Compact label="Peso padrão da barra" value={`${formatNumber(base.billetBarWeightKg, 0)} kg`} /><Compact label="Eficiência" value={`${formatNumber(base.extrusionEfficiency * 100, 0)}%`} /><Compact label="Produto útil / barra" value={`${formatNumber(base.billetBarWeightKg * base.extrusionEfficiency, 2)} kg`} /></div><div className="overflow-x-auto"><table className="w-full min-w-[1040px] text-sm"><thead className="text-left text-[10px] uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Liga</th><th className="px-4 py-3 text-right">Demanda programada</th><th className="px-4 py-3 text-right">Tarugo teórico</th><th className="px-4 py-3 text-right">Barras necessárias</th><th className="px-4 py-3 text-right">Carga calculada</th><th className="px-4 py-3 text-right">Estoque físico livre</th><th className="px-4 py-3 text-right">Cobertura</th><th className="px-4 py-3 text-right">Saldo após carga</th><th className="px-4 py-3 text-right">Sobra no processo</th></tr></thead><tbody>{billets.map((row) => {
+    const stockRow = stock.find((item) => item.alloyCode.trim().toUpperCase() === row.alloyCode.trim().toUpperCase());
+    const availableBars = stockRow?.availableBars ?? 0;
+    const balance = availableBars - row.bars;
+    const coverage = row.bars > 0 ? Math.min((availableBars / row.bars) * 100, 100) : 100;
+    return <tr key={row.alloyCode} className="border-t"><td className="px-4 py-3 font-mono font-black text-orange-600">{row.alloyCode}</td><td className="px-4 py-3 text-right font-bold">{formatNumber(row.demandKg)} kg</td><td className="px-4 py-3 text-right">{formatNumber(row.rawRequiredKg)} kg</td><td className="px-4 py-3 text-right text-lg font-black">{row.bars}</td><td className="px-4 py-3 text-right">{formatNumber(row.loadedKg)} kg</td><td className="px-4 py-3 text-right font-bold">{available ? `${availableBars} barra(s)` : "Não informado"}</td><td className={`px-4 py-3 text-right font-black ${available && coverage < 100 ? "text-red-600" : "text-emerald-600"}`}>{available ? `${formatNumber(coverage, 0)}%` : "—"}</td><td className={`px-4 py-3 text-right font-black ${balance < 0 ? "text-red-600" : "text-emerald-600"}`}>{available ? `${balance >= 0 ? "+" : ""}${balance} barra(s)` : "—"}</td><td className="px-4 py-3 text-right font-bold text-violet-700">{formatNumber(row.endingBalanceKg)} kg</td></tr>;
+  })}</tbody></table></div></div>;
 }
 
 function Compact({ label, value }: { label: string; value: string }) { return <div><p className="text-[9px] font-bold uppercase text-slate-400">{label}</p><p className="font-black text-slate-900">{value}</p></div>; }

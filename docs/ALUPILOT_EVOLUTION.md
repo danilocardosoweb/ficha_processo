@@ -27,7 +27,7 @@ Este documento é o registro vivo da evolução do sistema. Ele existe para pres
 | Fornos | Implementada | 3 fornos × 7 posições por prensa, aquecimento e liberação. |
 | Paradas | Implementada | Catálogos, turnos, abertura e encerramento. |
 | Carga Máquina | Parcial | Simulação determinística com interface de cenários e versionamento preparada; a persistência depende da aplicação da migration no Supabase. |
-| Estoque físico de tarugos | Não existe | Hoje o cálculo representa necessidade teórica. |
+| Estoque físico de tarugos | Preparado localmente | Cadastro por liga/lote, reservas e confronto com a carga foram implementados; a persistência depende da aplicação da migration no Supabase. |
 | Carcaças como recurso | Não existe | Há dados de carcaça, mas não agenda/reserva. |
 | Otimização explicável | Não existe | A sequência sugerida usa heurísticas fixas. |
 
@@ -107,3 +107,8 @@ Interface
 - adicionada a interface para salvar, listar e reabrir cenários históricos em modo somente leitura;
 - cada novo salvamento do mesmo cenário gera uma versão imutável com entradas, regras, resultados e recursos;
 - preparada a migration de cenários, versões, itens e eventos de recursos com acesso pelas sessões locais do TecnoMES.
+- criado o cadastro auditável de lotes de tarugo com liga, peso por barra, quantidade, localização, condição e data de entrada;
+- modeladas reservas FIFO por lote, com proteção contra estoque negativo e separação entre barras físicas, reservadas e livres;
+- integrada a disponibilidade real à Carga Máquina, com cobertura por liga e alerta de risco de parada por falta de material;
+- snapshots de cenários passaram a registrar a fotografia do estoque usada na análise;
+- nenhuma migration foi aplicada remotamente e nenhum repositório remoto foi atualizado nesta etapa.

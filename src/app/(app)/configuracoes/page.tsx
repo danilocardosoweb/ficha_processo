@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowRight, Clock3, Factory, FileCog, Megaphone, Settings2, UserRound, UsersRound, Wrench, CircleStop, History } from "lucide-react";
+import { ArrowRight, Clock3, Factory, FileCog, Megaphone, Settings2, UserRound, UsersRound, Wrench, CircleStop, History, PackageOpen } from "lucide-react";
 import { PageHeading } from "@/components/page-heading";
 import { requireAdmin } from "@/lib/local-auth/server";
 
@@ -7,6 +7,7 @@ const registrationCards = [
   { title: "Prensas", description: "Equipamentos disponíveis para planejamento e produção.", href: "/prensas", icon: Factory },
   { title: "Fichas de processo", description: "Receitas, parâmetros técnicos e sequências das ferramentas.", href: "/engenharia", icon: FileCog },
   { title: "Ferramentas", description: "Matrizes físicas, vida útil e histórico importado.", href: "/ferramentas", icon: Wrench },
+  { title: "Estoque de tarugos", description: "Barras físicas, lotes, reservas e disponibilidade por liga.", href: "/configuracoes/tarugos", icon: PackageOpen },
   { title: "Turnos e produção", description: "Horários, produtividade padrão e premissas da simulação.", href: "/configuracoes/producao", icon: Clock3 },
   { title: "Paradas e motivos", description: "Catálogo de ocorrências para Produção e Manutenção.", href: "/configuracoes/paradas", icon: CircleStop },
   { title: "Auditoria e conciliação", description: "Histórico imutável de setups, ações e confronto com os apontamentos da empresa.", href: "/configuracoes/auditoria", icon: History },
@@ -22,7 +23,7 @@ export default async function SettingsPage() {
           <span className="grid size-10 place-items-center rounded-xl bg-orange-50 text-orange-600"><Settings2 className="size-5" /></span>
           <div><h2 className="font-heading text-lg font-bold text-slate-900">Cadastros industriais</h2><p className="text-sm text-slate-500">Bases utilizadas pelo PCP, Engenharia e chão de fábrica.</p></div>
         </div>
-        <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6 md:p-6">
+        <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 md:p-6">
           {registrationCards.map((item) => (
             <Link key={item.href} href={item.href} className="group rounded-2xl border bg-slate-50/70 p-5 transition hover:-translate-y-0.5 hover:border-orange-200 hover:bg-orange-50/40 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/40">
               <div className="flex items-start justify-between gap-4">
