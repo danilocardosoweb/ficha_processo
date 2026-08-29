@@ -3,30 +3,33 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, Boxes, ChartNoAxesCombined, ChevronLeft, ChevronRight, FileCog, Flame, Gauge, Import, Menu, PackageSearch, Settings, ShieldCheck, TimerReset, UnlockKeyhole, Wrench } from "lucide-react";
+import { BarChart3, BellRing, Boxes, ChartNoAxesCombined, ChevronLeft, ChevronRight, FileCog, Flame, Gauge, History, Import, Menu, PackageSearch, Settings, ShieldCheck, TimerReset, UnlockKeyhole, Wrench } from "lucide-react";
 import { BrandMark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { useCurrentUser } from "@/components/current-user-provider";
+import { canAccess, type AccessArea } from "@/lib/access-control";
 
 const navigationGroups = [
   { label: "Operação", items: [
-    { label: "Visão geral", href: "/dashboard", icon: Gauge },
-    { label: "Produção", href: "/producao", icon: Boxes },
-    { label: "Ordens e planos", href: "/ordens", icon: PackageSearch },
-    { label: "Importar simplificada", href: "/importar", icon: Import },
-    { label: "Forno de ferramentas", href: "/forno", icon: Flame },
-    { label: "Carteira e planejamento", href: "/planejamento", icon: ChartNoAxesCombined },
-    { label: "Carga Máquina", href: "/carga-maquina", icon: TimerReset },
+    { label: "Visão geral", href: "/dashboard", icon: Gauge, permission: "dashboard" },
+    { label: "Produção", href: "/producao", icon: Boxes, permission: "production" },
+    { label: "Ordens e planos", href: "/ordens", icon: PackageSearch, permission: "orders" },
+    { label: "Importar simplificada", href: "/importar", icon: Import, permission: "import" },
+    { label: "Forno de ferramentas", href: "/forno", icon: Flame, permission: "oven" },
+    { label: "Carteira e planejamento", href: "/planejamento", icon: ChartNoAxesCombined, permission: "planning" },
+    { label: "Carga Máquina", href: "/carga-maquina", icon: TimerReset, permission: "simulation" },
   ] },
   { label: "Acompanhamento", items: [
-    { label: "Engenharia", href: "/engenharia", icon: FileCog },
-    { label: "Manutenção", href: "/manutencao", icon: Wrench },
-    { label: "Qualidade", href: "/qualidade", icon: ShieldCheck },
-    { label: "Indicadores", href: "/indicadores", icon: BarChart3 },
+    { label: "Engenharia", href: "/engenharia", icon: FileCog, permission: "engineering" },
+    { label: "Manutenção", href: "/manutencao", icon: Wrench, permission: "maintenance" },
+    { label: "Qualidade", href: "/qualidade", icon: ShieldCheck, permission: "quality" },
+    { label: "Indicadores", href: "/indicadores", icon: BarChart3, permission: "indicators" },
+    { label: "Avisos operacionais", href: "/mensagens", icon: BellRing, permission: "messages" },
+    { label: "Auditoria", href: "/configuracoes/auditoria", icon: History, permission: "audit" },
   ] },
-];
+] satisfies Array<{ label: string; items: Array<{ label: string; href: string; icon: typeof Gauge; permission: AccessArea }> }>;
 
 const settingsPaths = ["/configuracoes", "/prensas", "/ferramentas"];
 
@@ -46,10 +49,8 @@ function NavLink({ label, href, icon: Icon, active, compact, onNavigate }: {
 function NavContent({ compact = false, onNavigate, onToggle }: { compact?: boolean; onNavigate?: () => void; onToggle?: () => void }) {
   const pathname = usePathname();
   const user = useCurrentUser();
-  const isPlanningRole = user.role === "admin" || user.role === "pcp";
-  const canSeeEngineering = isPlanningRole || user.role === "engineering";
   const allowedMachines = user.machine_codes ?? [];
-  const canSeeMachine = (href: string) => isPlanningRole || href !== "/forno" || allowedMachines.length > 0;
+  const canSeeMachine = (href: string) => user.role === "admin" || user.role === "manager" || user.role === "pcp" || href !== "/forno" || allowedMachines.length > 0;
   return (
     <div className="flex h-full flex-col overflow-hidden bg-[#111927] text-slate-200">
       <div className={cn("flex h-24 shrink-0 items-center transition-all", compact ? "justify-center px-3" : "px-6")}><BrandMark compact={compact} /></div>
@@ -58,7 +59,7 @@ function NavContent({ compact = false, onNavigate, onToggle }: { compact?: boole
           <div key={group.label} className={cn(groupIndex > 0 && "mt-5")}>
             {!compact && <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-[.2em] text-slate-600">{group.label}</p>}
             <div className="space-y-1">
-              {group.items.filter((item) => (isPlanningRole || !["/importar", "/planejamento", "/carga-maquina"].includes(item.href)) && (item.href !== "/engenharia" || canSeeEngineering) && canSeeMachine(item.href)).map((item) => {
+              {group.items.filter((item) => canAccess(user.role, item.permission) && canSeeMachine(item.href)).map((item) => {
                 const active = pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(item.href));
                 return <NavLink key={item.href} {...item} active={active} compact={compact} onNavigate={onNavigate} />;
               })}
@@ -67,7 +68,7 @@ function NavContent({ compact = false, onNavigate, onToggle }: { compact?: boole
         ))}
       </nav>
       <div className="shrink-0 space-y-1 border-t border-white/[.07] p-2.5">
-        <NavLink label="Configurações" href="/configuracoes" icon={Settings} active={settingsPaths.some((path) => pathname.startsWith(path))} compact={compact} onNavigate={onNavigate} />
+        {canAccess(user.role, "administration") && <NavLink label="Configurações" href="/configuracoes" icon={Settings} active={settingsPaths.some((path) => pathname.startsWith(path))} compact={compact} onNavigate={onNavigate} />}
         {onToggle && (
           <button type="button" onClick={onToggle} aria-label={compact ? "Expandir menu" : "Recolher menu"} title={compact ? "Expandir menu" : undefined}
             className={cn("flex h-10 w-full items-center rounded-xl text-sm font-semibold text-slate-400 transition hover:bg-white/[.06] hover:text-white", compact ? "justify-center" : "gap-3 px-3")}

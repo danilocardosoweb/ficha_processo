@@ -2,7 +2,9 @@ import { Download } from "lucide-react";
 import { PageHeading } from "@/components/page-heading";
 import { SimplifiedImport } from "@/components/simplified-import";
 import { Button } from "@/components/ui/button";
-export default function ImportPage() {
+import { requirePermission } from "@/lib/local-auth/server";
+export default async function ImportPage() {
+  await requirePermission("import");
   return (
     <>
       <PageHeading

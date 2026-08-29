@@ -1,9 +1,9 @@
 import { AuditReconciliationCenter } from "@/components/audit-reconciliation-center";
 import { PageHeading } from "@/components/page-heading";
-import { requireAdmin } from "@/lib/local-auth/server";
+import { requirePermission } from "@/lib/local-auth/server";
 
 export default async function AuditPage() {
-  await requireAdmin();
+  await requirePermission("audit");
 
   return (
     <>

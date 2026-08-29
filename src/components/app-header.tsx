@@ -10,6 +10,7 @@ import { OfflineStatus } from "@/components/offline-status";
 import type { LocalUser } from "@/lib/local-auth/types";
 import { roleLabels, userInitials } from "@/lib/local-auth/types";
 import { useOperationalMessages } from "@/components/operational-messages-provider";
+import { canAccess } from "@/lib/access-control";
 
 export function AppHeader({ user }: { user: LocalUser }) {
   const router = useRouter();
@@ -41,8 +42,8 @@ export function AppHeader({ user }: { user: LocalUser }) {
             </div>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => router.push("/perfil")} className="gap-3 px-2.5 py-2.5 font-medium"><UserRound className="size-4 text-slate-500" />Meu perfil</DropdownMenuItem>
-            {(["admin", "pcp"] as string[]).includes(user.role) && <DropdownMenuItem onClick={() => router.push("/mensagens")} className="gap-3 px-2.5 py-2.5 font-medium"><Megaphone className="size-4 text-slate-500" />Mensagens e prioridades</DropdownMenuItem>}
-            {user.role === "admin" && <DropdownMenuItem onClick={() => router.push("/configuracoes")} className="gap-3 px-2.5 py-2.5 font-medium"><Settings className="size-4 text-slate-500" />Configurações</DropdownMenuItem>}
+            {canAccess(user.role, "messages") && <DropdownMenuItem onClick={() => router.push("/mensagens")} className="gap-3 px-2.5 py-2.5 font-medium"><Megaphone className="size-4 text-slate-500" />Mensagens e prioridades</DropdownMenuItem>}
+            {canAccess(user.role, "administration") && <DropdownMenuItem onClick={() => router.push("/configuracoes")} className="gap-3 px-2.5 py-2.5 font-medium"><Settings className="size-4 text-slate-500" />Configurações</DropdownMenuItem>}
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" onClick={() => void logout()} className="gap-3 px-2.5 py-2.5 font-semibold"><LogOut className="size-4" />Sair do sistema</DropdownMenuItem>
           </DropdownMenuContent>

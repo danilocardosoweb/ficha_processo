@@ -1,7 +1,9 @@
 import { PcpPlanningAnalysis } from "@/components/pcp-planning-analysis";
 import { PageHeading } from "@/components/page-heading";
+import { requirePermission } from "@/lib/local-auth/server";
 
-export default function PlanningAnalysisPage() {
+export default async function PlanningAnalysisPage() {
+  await requirePermission("planning");
   return (
     <>
       <PageHeading

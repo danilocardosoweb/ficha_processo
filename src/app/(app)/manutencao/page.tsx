@@ -1,6 +1,8 @@
 import { MaintenanceControl } from "@/components/maintenance-control";
+import { requirePermission } from "@/lib/local-auth/server";
 
-export default function Page() {
+export default async function Page() {
+  await requirePermission("maintenance");
   return (
     <div className="space-y-6 p-6 lg:p-8">
       <div>

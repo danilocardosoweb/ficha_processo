@@ -4,10 +4,12 @@ import { PageHeading } from "@/components/page-heading";
 import { OrdersTable } from "@/components/orders-table";
 import { Button } from "@/components/ui/button";
 import { listSimplifiedQueues } from "@/modules/pcp/orders-repository";
+import { requirePermission } from "@/lib/local-auth/server";
 
 export const dynamic = "force-dynamic";
 
 export default async function OrdersPage() {
+  await requirePermission("orders");
   const queues = await listSimplifiedQueues();
   return (
     <>

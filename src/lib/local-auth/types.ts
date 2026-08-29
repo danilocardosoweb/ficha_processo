@@ -1,9 +1,10 @@
-export const localRoles = ["admin", "pcp", "operator", "engineering", "maintenance", "quality", "viewer"] as const;
+export const localRoles = ["admin", "manager", "pcp", "operator", "engineering", "maintenance", "quality", "viewer"] as const;
 export const LOCAL_SESSION_COOKIE = "alummes_session";
 export type LocalRole = (typeof localRoles)[number];
 
 export const roleLabels: Record<LocalRole, string> = {
   admin: "Administrador",
+  manager: "Gerente",
   pcp: "PCP",
   operator: "Operador",
   engineering: "Engenharia",

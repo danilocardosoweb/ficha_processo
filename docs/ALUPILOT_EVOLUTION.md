@@ -205,3 +205,18 @@ Estas não são falhas de implementação. São cadastros físicos que precisam 
 - o Gantt passou a oferecer zoom contínuo de 32% a 236%, com botões de aproximação, controle deslizante, percentual visível e atalhos para visão geral e códigos legíveis;
 - os horários das extremidades da escala foram alinhados para permanecerem inteiramente visíveis durante a ampliação;
 - nenhuma regra produtiva, aprovação ou cálculo operacional foi removido nesta revisão.
+
+### 2026-08-28 — Central de avisos e controle de acesso
+
+- criada uma matriz única de acesso por área para os perfis Administrador, Gerente, PCP, Engenharia, Manutenção, Qualidade e Consulta;
+- o perfil Operador foi preservado apenas para compatibilidade com usuários antigos, sem aparecer como opção para novos cadastros;
+- o cadastro de usuários passou a mostrar, em flags somente leitura, exatamente quais áreas serão liberadas pelo perfil escolhido;
+- menus, atalhos do cabeçalho e rotas protegidas passaram a usar a mesma matriz, evitando divergências entre o que aparece na navegação e o que pode ser aberto diretamente;
+- a Central de avisos passou a classificar mensagens por Forno, Apontamento, Parada e Comunicado, mantendo leitura, reconhecimento e dispensa auditáveis;
+- ferramentas em aquecimento geram automaticamente um aviso ao atingir quatro horas e um novo marco a cada hora excedida; o marco anterior é encerrado para impedir acúmulo de alertas vencidos;
+- alertas térmicos são destinados a Administrador, Gerente e PCP e aumentam de prioridade conforme o tempo excedente;
+- novos apontamentos de produção geram avisos com ferramenta, prensa, produção, produtividade e operador;
+- abertura ou atualização de parada gera aviso para Administrador, Gerente, PCP e Manutenção;
+- o processamento térmico é executado no banco a cada cinco minutos e também ao consultar a Central, garantindo atualização mesmo após períodos sem o app aberto;
+- a migration foi aplicada e verificada no Supabase: novas colunas, restrições de perfil, gatilhos automáticos e agendamento `pg_cron` ativos;
+- os diagnósticos do Supabase foram executados; os avisos existentes sobre RPCs anônimas são compatíveis com a autenticação local por token validado dentro das funções, e as tabelas privadas continuam sem acesso direto.

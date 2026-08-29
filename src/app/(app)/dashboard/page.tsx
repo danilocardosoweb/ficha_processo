@@ -31,7 +31,7 @@ function dateTime(value: string) { return new Intl.DateTimeFormat("pt-BR", { dat
 export default async function DashboardPage() {
   const [user, snapshot] = await Promise.all([requireCurrentUser(), getDashboardSnapshot()]);
   const firstName = user.display_name.trim().split(/\s+/)[0] || user.username;
-  const canImport = user.role === "admin" || user.role === "pcp";
+  const canImport = user.role === "admin" || user.role === "manager" || user.role === "pcp";
   const kpis = [
     { label: "Produção concluída hoje", value: formatKg(snapshot.kpis.production_today_kg), note: comparison(snapshot.kpis.production_today_kg, snapshot.kpis.production_yesterday_kg), icon: Boxes, color: "text-orange-600 bg-orange-50" },
     { label: "Itens em andamento", value: integer.format(snapshot.kpis.in_progress_orders), note: `${snapshot.kpis.queued_orders.toLocaleString("pt-BR")} item(ns) aguardando na fila`, icon: Clock3, color: "text-violet-600 bg-violet-50" },

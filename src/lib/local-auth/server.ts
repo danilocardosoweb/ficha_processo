@@ -4,6 +4,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { LOCAL_SESSION_COOKIE, type LocalUser, type ManagedUser } from "@/lib/local-auth/types";
+import { canAccess, type AccessArea } from "@/lib/access-control";
 
 export async function getSessionToken() {
   return (await cookies()).get(LOCAL_SESSION_COOKIE)?.value ?? null;
@@ -31,6 +32,12 @@ export async function requireCurrentUser() {
 export async function requireAdmin() {
   const user = await requireCurrentUser();
   if (user.role !== "admin") redirect("/dashboard");
+  return user;
+}
+
+export async function requirePermission(area: AccessArea) {
+  const user = await requireCurrentUser();
+  if (!canAccess(user.role, area)) redirect("/dashboard");
   return user;
 }
 

@@ -3,6 +3,7 @@ export const messageAudiences = ["all", "user", "role", "press"] as const;
 
 export type MessagePriority = (typeof messagePriorities)[number];
 export type MessageAudience = (typeof messageAudiences)[number];
+export type MessageSource = "manual" | "heating" | "production" | "stoppage";
 
 export type OperationalMessage = {
   id: string;
@@ -16,6 +17,8 @@ export type OperationalMessage = {
   requires_ack: boolean;
   created_by_name: string;
   created_at: string;
+  source_type: MessageSource;
+  metadata: Record<string, unknown>;
   read_at: string | null;
   acknowledged_at: string | null;
   dismissed_at: string | null;
@@ -34,4 +37,3 @@ export type MessageTarget = {
   role: string;
   machine_codes: string[];
 };
-
