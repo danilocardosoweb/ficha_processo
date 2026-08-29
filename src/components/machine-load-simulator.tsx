@@ -270,6 +270,10 @@ interface AiPlanningAnalysis {
     evidence: string[];
     impact: string;
     action: string;
+    plainExplanation: string;
+    responsibleRole: string;
+    steps: string[];
+    successCheck: string;
     affectedTools: string[];
   }>;
   assumptions: string[];
@@ -2927,10 +2931,16 @@ function AiDecisionPanel({
   orderLabels: Record<string, string>;
 }) {
   const decisionLabels = {
-    approve: "Aprovar",
-    approve_with_adjustments: "Aprovar com ajustes",
-    replan: "Replanejar",
-    blocked: "Bloqueado",
+    approve: "Pode seguir",
+    approve_with_adjustments: "Ajustar antes de seguir",
+    replan: "Reorganizar a programação",
+    blocked: "Não iniciar agora",
+  } as const;
+  const priorityLabels = {
+    critical: "Ação urgente",
+    high: "Atenção",
+    medium: "Melhoria",
+    opportunity: "Oportunidade",
   } as const;
   return (
     <div className="border-t bg-gradient-to-r from-violet-50/80 via-white to-blue-50/70 p-5">
@@ -2985,26 +2995,50 @@ function AiDecisionPanel({
               <span className="rounded-full bg-violet-100 px-2.5 py-1 text-[10px] font-black uppercase text-violet-700">
                 {decisionLabels[analysis.result.decision]}
               </span>
-              <strong className="text-sm">
-                Confiança {Math.round(analysis.result.confidence)}%
-              </strong>
+              <span
+                className={`rounded-full px-2.5 py-1 text-[10px] font-black ${analysis.result.confidence >= 70 ? "bg-emerald-50 text-emerald-700" : analysis.result.confidence >= 40 ? "bg-amber-50 text-amber-800" : "bg-red-50 text-red-700"}`}
+              >
+                {analysis.result.confidence >= 70
+                  ? "Boa confiança nos dados"
+                  : analysis.result.confidence >= 40
+                    ? "Confirme alguns dados"
+                    : "Dados insuficientes: confirme antes de agir"}
+              </span>
             </div>
+            <p className="mt-3 text-[10px] font-black uppercase tracking-wide text-slate-500">
+              Situação atual
+            </p>
             <p className="mt-3 text-sm leading-6 text-slate-700">
               {analysis.result.executiveSummary}
             </p>
-            <p className="mt-3 text-[10px] text-slate-400">
-              {analysis.modelUsed} ·{" "}
-              {(analysis.durationMs / 1000).toLocaleString("pt-BR", {
-                maximumFractionDigits: 1,
-              })}
-              s{analysis.cached ? " · cache seguro" : ""}
-            </p>
             {analysis.result.missingData.length ? (
-              <div className="mt-3 rounded-xl bg-amber-50 p-3 text-xs text-amber-800">
-                <strong>Dados ainda necessários:</strong>{" "}
-                {analysis.result.missingData.join(" · ")}
+              <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                <strong className="block">Antes de decidir, confira:</strong>
+                <ol className="mt-2 space-y-1.5">
+                  {analysis.result.missingData.map((item, index) => (
+                    <li key={item} className="flex gap-2">
+                      <span className="grid size-5 shrink-0 place-items-center rounded-full bg-amber-200 font-black">
+                        {index + 1}
+                      </span>
+                      <span>{item}</span>
+                    </li>
+                  ))}
+                </ol>
               </div>
             ) : null}
+            <details className="mt-3 text-[10px] text-slate-400">
+              <summary className="cursor-pointer font-semibold">
+                Ver informações técnicas da análise
+              </summary>
+              <p className="mt-1">
+                Confiança calculada: {Math.round(analysis.result.confidence)}% ·{" "}
+                modelo {analysis.modelUsed} ·{" "}
+                {(analysis.durationMs / 1000).toLocaleString("pt-BR", {
+                  maximumFractionDigits: 1,
+                })}
+                s{analysis.cached ? " · resultado reaproveitado" : ""}
+              </p>
+            </details>
           </article>
           <div className="grid gap-3">
             <article className="rounded-2xl border border-violet-200 bg-white p-4 shadow-sm">
@@ -3029,7 +3063,7 @@ function AiDecisionPanel({
                   className="shrink-0 bg-violet-600 text-white hover:bg-violet-700"
                 >
                   <Sparkles className="size-4" />
-                  Avaliar na simulação
+                  Testar esta sequência
                 </Button>
               </div>
               <div className="mt-3 grid gap-2">
@@ -3076,8 +3110,8 @@ function AiDecisionPanel({
                 </div>
               </div>
               <p className="mt-3 text-[10px] font-semibold text-slate-500">
-                A IA não aprova nem altera a produção sozinha. Ao avaliar, o
-                cenário entra no modo manual e é recalculado pelo AluPilot.
+                Este botão não inicia nem aprova a produção. Ele apenas coloca a
+                sequência na simulação para você conferir e ajustar.
               </p>
             </article>
             {analysis.result.recommendations.map((item, index) => (
@@ -3090,7 +3124,7 @@ function AiDecisionPanel({
                   <span
                     className={`mt-0.5 rounded-full px-2 py-1 text-[9px] font-black uppercase ${item.priority === "critical" ? "bg-red-600 text-white" : item.priority === "high" ? "bg-amber-500 text-white" : item.priority === "opportunity" ? "bg-emerald-600 text-white" : "bg-slate-600 text-white"}`}
                   >
-                    {item.priority}
+                    {priorityLabels[item.priority]}
                   </span>
                   <div className="min-w-0 flex-1">
                     <strong className="text-sm">{item.title}</strong>
@@ -3102,16 +3136,45 @@ function AiDecisionPanel({
                   </div>
                   <ChevronDown className="size-4 text-slate-400" />
                 </summary>
-                <div className="border-t px-3 py-3 text-xs leading-5 text-slate-600">
-                  <p>
-                    <b>Evidências:</b> {item.evidence.join(" · ")}
-                  </p>
-                  <p>
-                    <b>Impacto:</b> {item.impact}
-                  </p>
-                  <p className="font-semibold text-slate-900">
-                    <b>Ação:</b> {item.action}
-                  </p>
+                <div className="space-y-3 border-t px-4 py-4 text-xs leading-5 text-slate-700">
+                  <div>
+                    <strong className="block text-slate-950">
+                      O que está acontecendo?
+                    </strong>
+                    <p className="mt-1">{item.plainExplanation}</p>
+                  </div>
+                  <div className="rounded-xl bg-red-50 p-3 text-red-900">
+                    <strong className="block">Por que isso importa?</strong>
+                    <p className="mt-1">{item.impact}</p>
+                  </div>
+                  <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-blue-950">
+                    <strong className="block">Quem deve agir?</strong>
+                    <p className="mt-1">{item.responsibleRole}</p>
+                    <strong className="mt-3 block">O que fazer agora:</strong>
+                    <ol className="mt-2 space-y-2">
+                      {item.steps.map((step, stepIndex) => (
+                        <li key={`${step}-${stepIndex}`} className="flex gap-2">
+                          <span className="grid size-6 shrink-0 place-items-center rounded-full bg-blue-700 font-black text-white">
+                            {stepIndex + 1}
+                          </span>
+                          <span className="pt-0.5 font-semibold">{step}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                  <div className="flex gap-2 rounded-xl bg-emerald-50 p-3 text-emerald-900">
+                    <CheckCircle2 className="mt-0.5 size-4 shrink-0" />
+                    <p>
+                      <strong>Como confirmar que resolveu:</strong>{" "}
+                      {item.successCheck}
+                    </p>
+                  </div>
+                  <details className="rounded-lg border px-3 py-2 text-[11px] text-slate-500">
+                    <summary className="cursor-pointer font-semibold">
+                      Ver dados usados nesta orientação
+                    </summary>
+                    <p className="mt-2">{item.evidence.join(" · ")}</p>
+                  </details>
                 </div>
               </details>
             ))}

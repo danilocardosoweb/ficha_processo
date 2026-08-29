@@ -33,6 +33,10 @@ const aiResultSchema = z.object({
         evidence: z.array(z.string().max(280)).min(1).max(5),
         impact: z.string().min(3).max(500),
         action: z.string().min(3).max(500),
+        plainExplanation: z.string().min(10).max(500),
+        responsibleRole: z.string().min(2).max(80),
+        steps: z.array(z.string().min(3).max(240)).min(1).max(6),
+        successCheck: z.string().min(3).max(300),
         affectedTools: z.array(z.string().max(50)).max(20),
       }),
     )
@@ -85,6 +89,10 @@ const outputSchema = {
           "evidence",
           "impact",
           "action",
+          "plainExplanation",
+          "responsibleRole",
+          "steps",
+          "successCheck",
           "affectedTools",
         ],
         properties: {
@@ -96,6 +104,10 @@ const outputSchema = {
           evidence: { type: "array", items: { type: "string" } },
           impact: { type: "string" },
           action: { type: "string" },
+          plainExplanation: { type: "string" },
+          responsibleRole: { type: "string" },
+          steps: { type: "array", items: { type: "string" } },
+          successCheck: { type: "string" },
           affectedTools: { type: "array", items: { type: "string" } },
         },
       },
@@ -314,7 +326,7 @@ export async function POST(request: Request) {
   const requestHash = createHash("sha256")
     .update(
       JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         packet: parsed.data,
         model: settings.aiModel,
         personality: settings.aiPersonalityPrompt,
@@ -363,11 +375,11 @@ export async function POST(request: Request) {
               messages: [
                 {
                   role: "system",
-                  content: `${String(settings.aiPersonalityPrompt)}\n\nCRITÉRIOS CONFIGURÁVEIS:\n${String(settings.aiAnalysisCriteria)}\n\nREGRAS DE SEGURANÇA: use somente os dados fornecidos; diferencie fato, inferência e dado ausente; nunca altere cálculos físicos; bloqueios determinísticos são soberanos; não invente estoques, tempos ou capacidades; responda em português do Brasil.`,
+                  content: `${String(settings.aiPersonalityPrompt)}\n\nCRITÉRIOS CONFIGURÁVEIS:\n${String(settings.aiAnalysisCriteria)}\n\nPÚBLICO DA RESPOSTA: operadores, líderes e profissionais do chão de fábrica. Escreva para uma pessoa sem conhecimento de informática ou planejamento. Use português do Brasil, palavras comuns, frases curtas, tom respeitoso e instruções diretas. Explique siglas e termos técnicos quando forem indispensáveis. Não mostre nomes internos de campos, código JSON, camelCase, fórmulas, datas ISO ou textos como "score = 0". Converta 240 minutos em "4 horas" e apresente horários no formato brasileiro.\n\nFORMATO DE CADA ORIENTAÇÃO: o título deve começar com um verbo; plainExplanation explica o problema em linguagem simples; responsibleRole diz quem deve agir; steps contém ações curtas, concretas e na ordem correta; successCheck ensina como confirmar visualmente que o problema foi resolvido. evidence deve conter apenas fatos fáceis de entender.\n\nREGRAS DE SEGURANÇA: use somente os dados fornecidos; diferencie fato, inferência e dado ausente; nunca altere cálculos físicos; bloqueios determinísticos são soberanos; não invente estoques, tempos ou capacidades.`,
                 },
                 {
                   role: "user",
-                  content: `Analise o pacote compacto desta simulação e produza no máximo ${Number(settings.aiMaxRecommendations) || 6} recomendações priorizadas. Além da análise, crie obrigatoriamente um cenário alternativo de sequenciamento para avaliação do PCP. Em proposedScenario, reorganize apenas os orderId existentes dentro da própria prensa; use cada orderId exatamente uma vez, não transfira ordens entre prensas e não invente ordens. Dê preferência a ações que evitem parada das prensas, respeitando bloqueios físicos, carcaças, BOs, ligas, prazo, cobertura térmica, volume e produtividade. O cenário será recalculado pelo motor determinístico antes de poder ser aprovado.\n\n${JSON.stringify(parsed.data)}`,
+                  content: `Analise o pacote compacto desta simulação e produza no máximo ${Number(settings.aiMaxRecommendations) || 6} orientações priorizadas. A resposta precisa ser autoexplicativa: diga claramente o que está acontecendo, por que isso pode parar ou atrasar a produção, quem deve agir, o passo a passo e como conferir o resultado. Evite jargões e nunca copie nomes técnicos do pacote para o texto destinado ao usuário.\n\nAlém da análise, crie obrigatoriamente um cenário alternativo de sequenciamento para avaliação do PCP. Em proposedScenario, reorganize apenas os orderId existentes dentro da própria prensa; use cada orderId exatamente uma vez, não transfira ordens entre prensas e não invente ordens. Explique o cenário com linguagem simples. Dê preferência a ações que evitem parada das prensas, respeitando bloqueios físicos, carcaças, BOs, ligas, prazo, cobertura térmica, volume e produtividade. O cenário será recalculado pelo motor determinístico antes de poder ser aprovado.\n\n${JSON.stringify(parsed.data)}`,
                 },
               ],
               temperature: 0.2,
