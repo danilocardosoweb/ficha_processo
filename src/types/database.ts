@@ -33,6 +33,11 @@ export interface ProductionOrder {
   status: OrderStatus;
   notes: string | null;
   source_data: Record<string, unknown>;
+  holes?: number | null;
+  bo_code?: string | null;
+  carcass_code?: string | null;
+  package_measure_mm?: number | null;
+  carcass_diameter_mm?: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -71,6 +76,8 @@ export interface SimplifiedRow {
   sequencia?: string;
   furos?: number;
   bo?: string;
+  medidaPacote?: number;
+  diametro?: number;
   bat?: string;
   box?: string;
   pc?: string;

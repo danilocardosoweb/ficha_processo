@@ -220,3 +220,19 @@ Estas não são falhas de implementação. São cadastros físicos que precisam 
 - o processamento térmico é executado no banco a cada cinco minutos e também ao consultar a Central, garantindo atualização mesmo após períodos sem o app aberto;
 - a migration foi aplicada e verificada no Supabase: novas colunas, restrições de perfil, gatilhos automáticos e agendamento `pg_cron` ativos;
 - os diagnósticos do Supabase foram executados; os avisos existentes sobre RPCs anônimas são compatíveis com a autenticação local por token validado dentro das funções, e as tabelas privadas continuam sem acesso direto.
+
+### 2026-08-28 — Inteligência híbrida de decisão
+
+- a Simplificada passou a importar `Medida Pacote` e `Diâmetro` em colunas próprias e a compor a carcaça no padrão `diâmetro × medida`, preservando os valores de origem no histórico;
+- o simulador passou a considerar BO como recurso físico compartilhado entre as duas prensas, com proteção contra uso simultâneo e bloqueio quando o estoque cadastrado não cobre a programação;
+- criado em Configurações o cadastro auditável do estoque de BOs, com quantidade total, indisponível, livre, status e localização;
+- a nota AluPilot ganhou critérios configuráveis para sequência de ferramentas com muitos furos e risco de corridas curtas, avaliando volume líquido, produtividade e tempo teórico;
+- os limites de “muitos furos”, máximo consecutivo e “volume baixo” podem ser ajustados pela operação sem alteração de código;
+- criada uma Analista IA opcional, com personalidade, critérios adicionais, seleção automática ou manual do modelo e quantidade máxima de recomendações configuráveis;
+- o processamento usa um pacote JSON compacto da simulação, sem dados de cliente, resposta estruturada, baixa aleatoriedade, bloqueio de coleta pelo provedor, fallback de modelo e limite de tempo;
+- regras físicas e recomendações determinísticas permanecem soberanas; a IA não altera a fila, não aprova cenários e não inventa capacidade ausente;
+- cada execução da IA registra hash do pedido, modelo solicitado e utilizado, duração, consumo, resultado ou falha para auditoria; análises idênticas são reutilizadas por 30 minutos;
+- a chave do OpenRouter fica exclusivamente na variável de servidor `OPENROUTER_API_KEY`; nenhuma chave foi gravada no código, no banco ou no histórico Git;
+- migration `alupilot_ai_decision_support` aplicada ao Supabase e verificada: novas colunas de ordem, tabelas de BO e auditoria de IA, configurações e RPCs estão disponíveis;
+- as 65 ordens existentes continuam preservadas; como foram importadas antes dos novos cabeçalhos, ainda não possuem `Medida Pacote` e `Diâmetro`. Uma nova importação da Simplificada preencherá esses dados sem inferência insegura;
+- lint, TypeScript e build de produção passaram; o projeto ainda não possui uma suíte automatizada de testes e essa lacuna permanece registrada.

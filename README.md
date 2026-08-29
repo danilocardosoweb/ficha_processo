@@ -43,6 +43,12 @@ npx supabase db push
 
 O importador reconhece XLS, XLSX, XLSM, XLSB, ODS, CSV e TSV e adapta os cabeçalhos da Simplificada utilizada nas prensas.
 
+## Analista IA do AluPilot
+
+A análise por IA é opcional e complementa as regras determinísticas da Carga Máquina. Configure uma chave nova do OpenRouter em `OPENROUTER_API_KEY`, somente no servidor, e ative o recurso em **Carga Máquina → Ajustar critérios**. A chave nunca deve usar o prefixo `NEXT_PUBLIC_` nem ser adicionada ao repositório.
+
+O AluPilot envia um pacote compacto sem identificação de cliente, exige resposta estruturada, registra modelo, duração e resultado para auditoria e reaproveita análises iguais por 30 minutos. A IA explica e prioriza; bloqueios de estoque, carcaça, BO, ferramenta e forno permanecem soberanos.
+
 ## Vercel
 
 Importe o repositorio na Vercel e cadastre as duas variaveis do `.env.example`. A chave `service_role` nunca deve ser cadastrada como variavel `NEXT_PUBLIC_*`.

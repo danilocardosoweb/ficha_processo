@@ -1,6 +1,6 @@
 import type { LoadSimulation, MachineLoadSettings, WorkShiftInput } from "../machine-load-simulator";
 
-export const SIMULATION_MODEL_VERSION = "alupilot-v2.0" as const;
+export const SIMULATION_MODEL_VERSION = "alupilot-v2.1" as const;
 
 export type SimulationStatus = "draft" | "calculated" | "approved" | "archived";
 export type SimulationMode = "fifo" | "optimized" | "manual";

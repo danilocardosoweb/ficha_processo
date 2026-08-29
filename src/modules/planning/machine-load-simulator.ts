@@ -19,8 +19,10 @@ export interface LoadOrderInput {
   toolHeatingState: "released" | "heating" | "waiting";
   /** Physical extrusion holes. Tracked now; rule influence will be versioned later. */
   holes?: number | null;
-  /** BO imported from the operational source. Tracked now; not yet a constraint. */
+  /** BO físico compartilhado entre as prensas. */
   boCode?: string | null;
+  packageMeasureMm?: number | null;
+  carcassDiameterMm?: number | null;
   carcassCode?: string | null;
   carcassQuantity?: number;
 }
@@ -38,7 +40,7 @@ export interface WorkShiftInput {
 
 export interface ResourceUnavailabilityInput {
   id: string;
-  resourceType: "press" | "oven" | "tool" | "carcass";
+  resourceType: "press" | "oven" | "tool" | "carcass" | "bo";
   resourceCode: string;
   startsAt: Date;
   endsAt: Date;
@@ -72,13 +74,19 @@ export interface CarcassCapacityInput {
   reservations: ExistingResourceReservation[];
 }
 
+export interface BoCapacityInput {
+  code: string;
+  capacity: number;
+}
+
 export interface SimulationResourcesInput {
   carcasses: CarcassCapacityInput[];
+  bos: BoCapacityInput[];
 }
 
 export interface SimulationConflict {
   id: string;
-  type: "missing-carcass" | "carcass-capacity" | "tool-conflict" | "resource-calendar";
+  type: "missing-carcass" | "carcass-capacity" | "missing-bo" | "bo-capacity" | "tool-conflict" | "resource-calendar";
   severity: "blocking" | "warning";
   resourceCode: string;
   machineCode: string;
@@ -371,7 +379,7 @@ export function simulateMachineLoad(
   mode: "fifo" | "optimized" = "fifo",
   shifts: WorkShiftInput[] = [],
   unavailable: ResourceUnavailabilityInput[] = [],
-  resources: SimulationResourcesInput = { carcasses: [] },
+  resources: SimulationResourcesInput = { carcasses: [], bos: [] },
 ): LoadSimulation {
   if (!shifts.some((shift) => shift.isActive)) throw new Error("Cadastre pelo menos um turno ativo para calcular a Carga Máquina.");
   const balances = new Map<string, number>();
@@ -384,6 +392,8 @@ export function simulateMachineLoad(
   const conflicts: SimulationConflict[] = [];
   const toolReservations = new Map<string, ReservedInterval[]>();
   const carcassReservations = new Map<string, ReservedInterval[]>();
+  const boReservations = new Map<string, ReservedInterval[]>();
+  const boInventoryEnabled = resources.bos.length > 0;
   for (const carcass of resources.carcasses) {
     carcassReservations.set(normalizedAlloy(carcass.code), carcass.reservations.flatMap((reservation) => reservation.startsAt && reservation.endsAt ? [{ start: reservation.startsAt, end: reservation.endsAt, quantity: reservation.quantity, orderId: reservation.productionOrderId }] : []));
   }
@@ -449,10 +459,19 @@ export function simulateMachineLoad(
       const itemConflicts: SimulationConflict[] = [];
       const carcassKey = order.carcassCode ? normalizedAlloy(order.carcassCode) : "";
       const carcass = carcassKey ? resources.carcasses.find((item) => normalizedAlloy(item.code) === carcassKey) : null;
+      const boKey = order.boCode ? normalizedAlloy(order.boCode) : "";
+      const bo = boKey ? resources.bos.find((item) => normalizedAlloy(item.code) === boKey) : null;
       if (!carcassKey) {
         itemConflicts.push({ id: `missing-carcass-${order.id}`, type: "missing-carcass", severity: "blocking", resourceCode: "SEM CARCAÇA", machineCode, orderId: order.id, toolCode: order.toolCode, message: `Cadastre a carcaça exigida pela ferramenta ${order.toolCode}.`, delayMinutes: 0 });
       } else if (!carcass || carcass.capacity < Math.max(order.carcassQuantity ?? 1, 1)) {
         itemConflicts.push({ id: `carcass-capacity-${order.id}`, type: "carcass-capacity", severity: "blocking", resourceCode: carcassKey, machineCode, orderId: order.id, toolCode: order.toolCode, message: `A carcaça ${carcassKey} não possui unidade física disponível.`, delayMinutes: 0 });
+      }
+      if (!boKey) {
+        itemConflicts.push({ id: `missing-bo-${order.id}`, type: "missing-bo", severity: "blocking", resourceCode: "SEM BO", machineCode, orderId: order.id, toolCode: order.toolCode, message: `Informe o BO exigido pela ferramenta ${order.toolCode}.`, delayMinutes: 0 });
+      } else if (!boInventoryEnabled) {
+        itemConflicts.push({ id: `bo-catalog-${order.id}`, type: "bo-capacity", severity: "warning", resourceCode: boKey, machineCode, orderId: order.id, toolCode: order.toolCode, message: `Cadastre o estoque físico de BOs para validar a disponibilidade do BO ${boKey}.`, delayMinutes: 0 });
+      } else if (!bo || bo.capacity < 1) {
+        itemConflicts.push({ id: `bo-capacity-${order.id}`, type: "bo-capacity", severity: "blocking", resourceCode: boKey, machineCode, orderId: order.id, toolCode: order.toolCode, message: `O BO ${boKey} não possui unidade física disponível.`, delayMinutes: 0 });
       }
 
       const resourceWaitStartedAt = new Date(resourceReady);
@@ -470,6 +489,12 @@ export function simulateMachineLoad(
           if (carcassBlock) blockers.push({ end: carcassBlock, type: "carcass-capacity", code: carcassKey, message: `Aguardando uma unidade livre da carcaça ${carcassKey}.` });
           const carcassCalendar = calendarBlockEnd(resourceReady, endAt, unavailable, "carcass", carcassKey);
           if (carcassCalendar) blockers.push({ end: carcassCalendar, type: "resource-calendar", code: carcassKey, message: `A carcaça ${carcassKey} está indisponível no calendário.` });
+        }
+        if (bo && bo.capacity > 0) {
+          const boBlock = overlappingPeriodEnd(resourceReady, endAt, boReservations.get(boKey) ?? [], bo.capacity);
+          if (boBlock) blockers.push({ end: boBlock, type: "bo-capacity", code: boKey, message: `Aguardando uma unidade livre do BO ${boKey}.` });
+          const boCalendar = calendarBlockEnd(resourceReady, endAt, unavailable, "bo", boKey);
+          if (boCalendar) blockers.push({ end: boCalendar, type: "resource-calendar", code: boKey, message: `O BO ${boKey} está indisponível no calendário.` });
         }
         if (!blockers.length) break;
         const blocker = blockers.sort((left, right) => left.end.getTime() - right.end.getTime())[0];
@@ -503,6 +528,7 @@ export function simulateMachineLoad(
       const interval = { start: resourceReady, end: endAt, quantity: 1, orderId: order.id };
       toolReservations.set(toolKey, [...(toolReservations.get(toolKey) ?? []), interval]);
       if (carcass && carcass.capacity > 0) carcassReservations.set(carcassKey, [...(carcassReservations.get(carcassKey) ?? []), { ...interval, quantity: Math.max(order.carcassQuantity ?? 1, 1) }]);
+      if (bo && bo.capacity > 0) boReservations.set(boKey, [...(boReservations.get(boKey) ?? []), interval]);
       conflicts.push(...itemConflicts);
       pressAvailable = endAt;
       previousAlloy = selectedAlloy;

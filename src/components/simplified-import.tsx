@@ -70,6 +70,8 @@ const aliases = {
   sequencia: ["seq", "sequencia"],
   furos: ["furos", "numerodefuros"],
   bo: ["bo"],
+  medidaPacote: ["medidapacote", "medidadopacote", "pacote"],
+  diametro: ["diametro", "diametrocarcaca", "diam"],
   bat: ["bat"],
   box: ["box"],
   pc: ["pc", "pcs", "pecas", "quantidadepcs"],
@@ -314,6 +316,8 @@ function mapRows(rows: Cell[][], fileName: string) {
         sequencia,
         furos: parseNumber(value(row, "furos")),
         bo: cellText(value(row, "bo")),
+        medidaPacote: parseNumber(value(row, "medidaPacote")) || undefined,
+        diametro: parseNumber(value(row, "diametro")) || undefined,
         bat: cellText(value(row, "bat")),
         box: cellText(value(row, "box")),
         pc: cellText(value(row, "pc")),
@@ -556,6 +560,9 @@ export function SimplifiedImport() {
             last_productivity_kg_h: row.ultimaProdutividadeKgH || null,
             holes: row.furos && row.furos > 0 ? Math.round(row.furos) : null,
             bo_code: row.bo || null,
+            package_measure_mm: row.medidaPacote || null,
+            carcass_diameter_mm: row.diametro || null,
+            carcass_code: row.diametro && row.medidaPacote ? `${row.diametro}X${row.medidaPacote}` : null,
             notes: row.observacao || null,
             source_data: {
               ...row,
@@ -742,7 +749,7 @@ export function SimplifiedImport() {
                     "Item / Seq.",
                     "Prensa",
                     "Ferramenta",
-                    "Furos / BO",
+                    "Furos / BO / Carcaça",
                     "Cliente / observação",
                     "Liga",
                     "Demanda",
@@ -787,7 +794,7 @@ export function SimplifiedImport() {
                       {row.ferramenta}
                     </td>
                     <td className="px-3 font-semibold">
-                      {row.furos ? `${row.furos} furo(s)` : "Furos —"} · {row.bo ? `BO ${row.bo}` : "BO —"}
+                      {row.furos ? `${row.furos} furo(s)` : "Furos —"} · {row.bo ? `BO ${row.bo}` : "BO —"}<span className="block text-[10px] text-slate-500">{row.diametro && row.medidaPacote ? `${row.diametro}×${row.medidaPacote} mm` : "Carcaça —"}</span>
                     </td>
                     <td
                       className="max-w-64 truncate px-3"
