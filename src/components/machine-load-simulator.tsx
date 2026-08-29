@@ -296,6 +296,7 @@ interface AiAnalysisEnvelope {
   durationMs: number;
   createdAt: string;
   cached: boolean;
+  fallback?: boolean;
 }
 interface OpenRouterModelOption {
   id: string;
@@ -476,6 +477,10 @@ function aiDecisionPacket(
       title: item.title,
       reason: item.reason,
       action: item.action,
+      impact: item.impact,
+      responsibleRole: item.responsibleRole,
+      steps: item.steps,
+      successCheck: item.successCheck,
       toolCode: item.toolCode ?? null,
       machineCode: item.machineCode ?? null,
     })),
@@ -2289,6 +2294,16 @@ function PlanningIntelligencePanel({
     draft.shortRun;
   const hasUnsavedChanges =
     savedSignature !== null && JSON.stringify(draft) !== savedSignature;
+  function closeEditor() {
+    if (
+      hasUnsavedChanges &&
+      !window.confirm(
+        "Existem alterações que ainda não foram salvas. Deseja fechar e perder essas alterações?",
+      )
+    )
+      return;
+    setEditing(false);
+  }
   const tone =
     analysis.score.overall >= 85
       ? "emerald"
@@ -2303,6 +2318,15 @@ function PlanningIntelligencePanel({
     amber: "border-amber-200 bg-amber-50 text-amber-900",
     red: "border-red-200 bg-red-50 text-red-900",
   }[tone];
+  const criterionNextStep: Record<string, string> = {
+    thermal: "Confira se as próximas ferramentas já estão no forno.",
+    resources: "Confira carcaças, BOs e ferramentas livres.",
+    material: "Confira se as barras necessárias estão separadas.",
+    delivery: "Confira primeiro as ordens com prazo mais próximo.",
+    flow: "Procure reduzir trocas, preparações e esperas.",
+    holeSequence: "Evite muitas ferramentas de vários furos seguidas.",
+    shortRun: "Intercale uma ordem mais longa entre corridas rápidas.",
+  };
   const recommendationGroups = useMemo(() => {
     type Recommendation = PlanningAnalysis["recommendations"][number];
     const grouped = new Map<
@@ -2372,7 +2396,8 @@ function PlanningIntelligencePanel({
             onClick={() => {
               setDraft(weights);
               setSavedAt(null);
-              setSavedSignature(null);
+              setSavedSignature(JSON.stringify(weights));
+              setError("");
               setEditing(true);
               if (modelCatalogState === "idle") void loadModelCatalog();
             }}
@@ -2406,6 +2431,11 @@ function PlanningIntelligencePanel({
                     <p className="mt-0.5 line-clamp-2 text-xs text-slate-500">
                       {criterion.explanation}
                     </p>
+                    {criterion.score < 80 ? (
+                      <p className="mt-1 text-xs font-semibold text-slate-700">
+                        Próxima conferência: {criterionNextStep[criterion.key]}
+                      </p>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -2481,16 +2511,30 @@ function PlanningIntelligencePanel({
                     </summary>
                     <div className="border-t border-current/10 px-3 pb-3 pt-2 text-xs text-slate-600">
                       <p>
-                        <b>Por quê:</b>{" "}
+                        <b>O que foi encontrado:</b>{" "}
                         {group.items.length > 1
                           ? `${group.items.length} situações do mesmo tipo foram reunidas para facilitar a leitura.`
                           : item.reason}
                       </p>
-                      <p className="mt-1">
-                        <b>Impacto:</b> {item.impact}
+                      <p className="mt-2 rounded-lg bg-red-50 p-2 text-red-900">
+                        <b>O que pode acontecer:</b> {item.impact}
                       </p>
-                      <p className="mt-1 font-semibold text-slate-800">
-                        <b>Ação:</b> {item.action}
+                      <div className="mt-2 rounded-lg border border-blue-200 bg-blue-50 p-2 text-blue-950">
+                        <b>Quem deve agir:</b> {item.responsibleRole}
+                        <b className="mt-2 block">Passo a passo:</b>
+                        <ol className="mt-1 space-y-1.5">
+                          {item.steps.map((step, index) => (
+                            <li key={`${step}-${index}`} className="flex gap-2">
+                              <span className="grid size-5 shrink-0 place-items-center rounded-full bg-blue-700 text-[10px] font-black text-white">
+                                {index + 1}
+                              </span>
+                              <span>{step}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                      <p className="mt-2 rounded-lg bg-emerald-50 p-2 text-emerald-900">
+                        <b>Como conferir:</b> {item.successCheck}
                       </p>
                     </div>
                   </details>
@@ -2551,7 +2595,7 @@ function PlanningIntelligencePanel({
                   e explica alternativas.
                 </p>
               </div>
-              <button type="button" onClick={() => setEditing(false)}>
+              <button type="button" onClick={closeEditor}>
                 <X className="size-5" />
               </button>
             </header>
@@ -2880,7 +2924,7 @@ function PlanningIntelligencePanel({
               ) : null}
             </div>
             <footer className="flex justify-end gap-2 border-t bg-slate-50 px-5 py-3">
-              <Button variant="outline" onClick={() => setEditing(false)}>
+              <Button variant="outline" onClick={closeEditor}>
                 {savedAt ? "Fechar" : "Cancelar"}
               </Button>
               <Button
@@ -2987,6 +3031,27 @@ function AiDecisionPanel({
         <p className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs font-semibold text-red-700">
           {error}
         </p>
+      ) : null}
+      {busy ? (
+        <div className="mt-3 rounded-xl border border-violet-200 bg-violet-50 p-3 text-xs text-violet-900">
+          <strong className="block">
+            Montando uma orientação simples e segura…
+          </strong>
+          <span>
+            A analista confere prensas, ferramentas, fornos, material e prazo.
+            Isso pode levar até 1 minuto.
+          </span>
+        </div>
+      ) : null}
+      {analysis?.fallback ? (
+        <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+          <strong className="block">
+            A IA demorou, mas você não ficou sem orientação.
+          </strong>
+          O AluPilot mostrou abaixo o passo a passo calculado pelas regras
+          seguras da fábrica. Para receber um cenário alternativo da IA, tente
+          novamente depois de resolver os avisos urgentes.
+        </div>
       ) : null}
       {analysis ? (
         <div className="mt-4 grid gap-3 lg:grid-cols-[.8fr_1.2fr]">
@@ -3247,6 +3312,15 @@ function NumberSetting({
 
 function PlanningLearningPanel({ data }: { data: IntelligencePayload }) {
   const [expanded, setExpanded] = useState(false);
+  const confidence = data.summary.confidencePercent;
+  const learningMessage =
+    data.summary.observations === 0
+      ? "Ainda não há produções concluídas para comparar. Continue registrando o resultado real."
+      : confidence < 40
+        ? "O sistema ainda está aprendendo. Use os valores como apoio e confirme com o líder antes de mudar a produção."
+        : confidence < 70
+          ? "O sistema já reconhece tendências, mas algumas ferramentas ainda precisam de mais produções registradas."
+          : "O sistema já possui uma base consistente para ajudar nas previsões de produção.";
   return (
     <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
       <button
@@ -3262,14 +3336,9 @@ function PlanningLearningPanel({ data }: { data: IntelligencePayload }) {
             Aprendizado operacional
           </p>
           <h2 className="font-heading font-black">
-            {data.summary.observations} execução(ões) aprendidas · confiança{" "}
-            {formatNumber(data.summary.confidencePercent, 0)}%
+            O que o sistema aprendeu com a produção
           </h2>
-          <p className="text-xs text-slate-500">
-            {data.summary.predictionsCompared} comparação(ões) previsão ×
-            realizado · erro médio{" "}
-            {formatNumber(data.summary.meanAbsoluteErrorPercent, 1)}%
-          </p>
+          <p className="text-xs text-slate-500">{learningMessage}</p>
         </div>
         <span className="text-xs font-bold text-slate-500">
           {expanded ? "Recolher" : "Ver calibração"}
@@ -3277,18 +3346,35 @@ function PlanningLearningPanel({ data }: { data: IntelligencePayload }) {
       </button>
       {expanded ? (
         <div className="border-t">
+          <div className="mx-5 mt-5 rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-950">
+            <strong>Como ajudar o sistema a aprender melhor:</strong>
+            <ol className="mt-3 grid gap-3 sm:grid-cols-3">
+              {[
+                "Registre o início e o fim real de cada produção.",
+                "Informe a quantidade realmente produzida e qualquer parada.",
+                "Depois de algumas execuções, compare a previsão com o realizado.",
+              ].map((step, index) => (
+                <li key={step} className="flex gap-2">
+                  <span className="grid size-6 shrink-0 place-items-center rounded-full bg-blue-700 text-xs font-black text-white">
+                    {index + 1}
+                  </span>
+                  <span>{step}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
           <div className="grid gap-3 p-5 sm:grid-cols-3">
             <LearningMetric
-              label="Base de aprendizado"
-              value={`${data.summary.observations} execuções`}
+              label="Produções registradas"
+              value={`${data.summary.observations}`}
             />
             <LearningMetric
-              label="Previsões comparadas"
+              label="Previsão conferida com o real"
               value={`${data.summary.predictionsCompared}`}
             />
             <LearningMetric
-              label="Erro absoluto médio"
-              value={`${formatNumber(data.summary.meanAbsoluteErrorPercent, 1)}%`}
+              label="Segurança para usar a previsão"
+              value={`${formatNumber(confidence, 0)}%`}
             />
           </div>
           <div className="overflow-x-auto">
@@ -3298,10 +3384,10 @@ function PlanningLearningPanel({ data }: { data: IntelligencePayload }) {
                   <th className="px-5 py-3">Ferramenta / setup</th>
                   <th>Prensa</th>
                   <th>Amostras</th>
-                  <th>Prod. realizada média</th>
-                  <th>Erro médio</th>
-                  <th>Confiança</th>
-                  <th>Status</th>
+                  <th>Produção real média</th>
+                  <th>Diferença da previsão</th>
+                  <th>Segurança do cálculo</th>
+                  <th>Pronto para usar?</th>
                 </tr>
               </thead>
               <tbody>
@@ -3347,7 +3433,7 @@ function PlanningLearningPanel({ data }: { data: IntelligencePayload }) {
                       <span
                         className={`rounded-full px-2 py-1 text-[10px] font-black uppercase ${group.calibrated ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}
                       >
-                        {group.calibrated ? "Calibrado" : "Coletando"}
+                        {group.calibrated ? "Sim" : "Ainda aprendendo"}
                       </span>
                     </td>
                   </tr>
@@ -3356,7 +3442,8 @@ function PlanningLearningPanel({ data }: { data: IntelligencePayload }) {
             </table>
             {!data.groups.length ? (
               <div className="grid h-32 place-items-center text-sm text-slate-400">
-                Conclua produções para iniciar o aprendizado.
+                Conclua uma produção e registre o resultado real para iniciar o
+                aprendizado.
               </div>
             ) : null}
           </div>

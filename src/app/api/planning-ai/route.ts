@@ -4,6 +4,8 @@ import { z } from "zod";
 import { getSessionToken } from "@/lib/local-auth/server";
 import { createClient } from "@/lib/supabase/server";
 
+export const maxDuration = 120;
+
 const packetSchema = z.object({
   generatedAt: z.string().datetime(),
   mode: z.string().max(30),
@@ -202,6 +204,107 @@ function friendlyAiError(cause: unknown) {
   return "A IA ficou temporariamente indisponível. A simulação e a análise determinística continuam válidas.";
 }
 
+function safeText(value: unknown, fallback: string) {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function deterministicFallback(
+  packet: z.infer<typeof packetSchema>,
+  maximumRecommendations: number,
+) {
+  const rawRecommendations = packet.deterministicRecommendations.slice(
+    0,
+    maximumRecommendations,
+  );
+  const recommendations = rawRecommendations.map((raw, index) => {
+    const steps = Array.isArray(raw.steps)
+      ? raw.steps.filter((item): item is string => typeof item === "string")
+      : [];
+    const toolCode = safeText(raw.toolCode, "");
+    return {
+      priority: ["critical", "high", "medium", "opportunity"].includes(
+        String(raw.priority),
+      )
+        ? (raw.priority as "critical" | "high" | "medium" | "opportunity")
+        : ("medium" as const),
+      title: safeText(raw.title, `Conferir o ponto ${index + 1}`),
+      evidence: [
+        safeText(
+          raw.reason,
+          "A regra de segurança encontrou um ponto que precisa ser conferido.",
+        ),
+      ],
+      impact: safeText(
+        raw.impact,
+        "A produção pode atrasar ou precisar de uma nova conferência.",
+      ),
+      action: safeText(
+        raw.action,
+        "Confira o cadastro e calcule a simulação novamente.",
+      ),
+      plainExplanation: safeText(
+        raw.reason,
+        "Existe um ponto da programação que precisa ser conferido antes de seguir.",
+      ),
+      responsibleRole: safeText(raw.responsibleRole, "PCP e líder da produção"),
+      steps: steps.length
+        ? steps.slice(0, 6)
+        : [
+            safeText(raw.action, "Confira o cadastro indicado."),
+            "Calcule a simulação novamente e veja se o aviso desapareceu.",
+          ],
+      successCheck: safeText(
+        raw.successCheck,
+        "O aviso desaparece e nenhum novo bloqueio é criado.",
+      ),
+      affectedTools: toolCode ? [toolCode] : [],
+    };
+  });
+  const machines = packet.machines
+    .map((rawMachine) => {
+      const machineCode = safeText(rawMachine.machineCode, "");
+      const items = Array.isArray(rawMachine.items) ? rawMachine.items : [];
+      return {
+        machineCode,
+        orderedOrderIds: items
+          .map((rawItem) =>
+            rawItem && typeof rawItem === "object"
+              ? safeText((rawItem as Record<string, unknown>).orderId, "")
+              : "",
+          )
+          .filter(Boolean),
+      };
+    })
+    .filter((item) => item.machineCode && item.orderedOrderIds.length);
+  const hasCritical = recommendations.some(
+    (item) => item.priority === "critical",
+  );
+  return aiResultSchema.parse({
+    executiveSummary: hasCritical
+      ? "A análise segura encontrou bloqueios que precisam ser resolvidos antes de iniciar a produção. Siga o passo a passo das ações urgentes e calcule novamente."
+      : "A análise segura encontrou pontos de atenção. Confira as orientações abaixo antes de decidir se a sequência pode seguir.",
+    decision: hasCritical ? "blocked" : "approve_with_adjustments",
+    confidence: 35,
+    recommendations,
+    assumptions: [],
+    missingData: [
+      "A analista de IA não respondeu dentro do tempo. As orientações abaixo foram montadas pelas regras seguras do AluPilot.",
+    ],
+    proposedScenario: {
+      title: "Sequência atual para conferência segura",
+      rationale:
+        "A IA não concluiu uma nova sequência. Para não criar uma mudança sem análise, o AluPilot manteve a ordem atual e destacou o que deve ser corrigido primeiro.",
+      expectedBenefits: [
+        "Permite continuar a conferência sem ignorar os bloqueios físicos.",
+      ],
+      risks: [
+        "Esta sequência ainda não é uma alternativa criada pela IA; tente analisar novamente depois de resolver os avisos urgentes.",
+      ],
+      machines,
+    },
+  });
+}
+
 async function context() {
   const token = await getSessionToken();
   return token ? { token, supabase: await createClient() } : null;
@@ -347,7 +450,7 @@ export async function POST(request: Request) {
   try {
     const modelAttempts =
       settings.aiModelMode === "auto"
-        ? ["openrouter/auto", "deepseek/deepseek-v4-flash-0731"]
+        ? ["deepseek/deepseek-v4-flash-0731"]
         : [model];
     let completed:
       | {
@@ -363,7 +466,7 @@ export async function POST(request: Request) {
           "https://openrouter.ai/api/v1/chat/completions",
           {
             method: "POST",
-            signal: AbortSignal.timeout(60_000),
+            signal: AbortSignal.timeout(55_000),
             headers: {
               Authorization: `Bearer ${key}`,
               "Content-Type": "application/json",
@@ -485,11 +588,19 @@ export async function POST(request: Request) {
       p_duration_ms: Date.now() - started,
       p_error_message: technicalMessage.slice(0, 1000),
     });
-    return NextResponse.json(
-      {
-        error: message,
-      },
-      { status: 502 },
+    const fallbackResult = deterministicFallback(
+      parsed.data,
+      Number(settings.aiMaxRecommendations) || 6,
     );
+    return NextResponse.json({
+      result: fallbackResult,
+      modelUsed: "Regras seguras do AluPilot",
+      usage: {},
+      durationMs: Date.now() - started,
+      createdAt: new Date().toISOString(),
+      cached: false,
+      fallback: true,
+      warning: message,
+    });
   }
 }

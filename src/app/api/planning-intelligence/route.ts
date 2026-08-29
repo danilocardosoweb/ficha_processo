@@ -120,9 +120,31 @@ export async function POST(request: Request) {
       { error: "O banco não devolveu a configuração confirmada." },
       { status: 500 },
     );
+  const confirmedSettings = schema.safeParse(confirmedPayload.settings);
+  if (!confirmedSettings.success)
+    return NextResponse.json(
+      {
+        error:
+          "Os dados foram enviados, mas a confirmação do banco veio incompleta. Tente salvar novamente.",
+      },
+      { status: 500 },
+    );
+  const changedFields = Object.keys(value).filter((key) => {
+    const field = key as keyof typeof value;
+    return confirmedSettings.data[field] !== value[field];
+  });
+  if (changedFields.length)
+    return NextResponse.json(
+      {
+        error:
+          "O banco não confirmou todos os valores alterados. Nada foi mostrado como salvo; tente novamente.",
+        changedFields,
+      },
+      { status: 409 },
+    );
   return NextResponse.json({
     ok: true,
-    settings: confirmedPayload.settings,
+    settings: confirmedSettings.data,
     savedAt: new Date().toISOString(),
   });
 }
