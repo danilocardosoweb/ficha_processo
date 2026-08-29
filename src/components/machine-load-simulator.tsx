@@ -1144,15 +1144,20 @@ export function MachineLoadSimulator() {
     });
     const payload = (await response.json().catch(() => null)) as {
       error?: string;
+      settings?: IntelligenceWeights;
+      savedAt?: string;
     } | null;
     if (!response.ok)
       throw new Error(
         payload?.error || "Não foi possível salvar os critérios.",
       );
-    setIntelligence((current) => ({ ...current, settings: weights }));
+    if (!payload?.settings)
+      throw new Error("O banco não confirmou os critérios salvos.");
+    setIntelligence((current) => ({ ...current, settings: payload.settings! }));
     setScenarioNotice(
       "Critérios da nota atualizados e registrados na auditoria.",
     );
+    return payload.settings;
   }
 
   if (loading)
@@ -2181,13 +2186,15 @@ function PlanningIntelligencePanel({
   aiBusy: boolean;
   aiError: string;
   onAnalyze: () => void;
-  onSave: (weights: IntelligenceWeights) => Promise<void>;
+  onSave: (weights: IntelligenceWeights) => Promise<IntelligenceWeights>;
 }) {
   const [editing, setEditing] = useState(false);
   const [showAllRecommendations, setShowAllRecommendations] = useState(false);
   const [draft, setDraft] = useState(weights);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [savedAt, setSavedAt] = useState<Date | null>(null);
+  const [savedSignature, setSavedSignature] = useState<string | null>(null);
   const [modelCatalog, setModelCatalog] = useState<OpenRouterModelOption[]>([]);
   const [modelCatalogState, setModelCatalogState] = useState<
     "idle" | "loading" | "ready" | "error"
@@ -2219,6 +2226,8 @@ function PlanningIntelligencePanel({
     draft.flow +
     draft.holeSequence +
     draft.shortRun;
+  const hasUnsavedChanges =
+    savedSignature !== null && JSON.stringify(draft) !== savedSignature;
   const tone =
     analysis.score.overall >= 85
       ? "emerald"
@@ -2254,8 +2263,10 @@ function PlanningIntelligencePanel({
     setBusy(true);
     setError("");
     try {
-      await onSave(draft);
-      setEditing(false);
+      const confirmed = await onSave(draft);
+      setDraft(confirmed);
+      setSavedAt(new Date());
+      setSavedSignature(JSON.stringify(confirmed));
     } catch (cause) {
       setError(
         cause instanceof Error
@@ -2299,6 +2310,8 @@ function PlanningIntelligencePanel({
             size="sm"
             onClick={() => {
               setDraft(weights);
+              setSavedAt(null);
+              setSavedSignature(null);
               setEditing(true);
               if (modelCatalogState === "idle") void loadModelCatalog();
             }}
@@ -2774,10 +2787,38 @@ function PlanningIntelligencePanel({
                   {error}
                 </p>
               ) : null}
+              {savedAt && !hasUnsavedChanges ? (
+                <div className="mt-4 flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+                  <CheckCircle2 className="size-5 shrink-0" />
+                  <div>
+                    <strong className="block">
+                      Configuração confirmada no banco
+                    </strong>
+                    <span className="text-xs">
+                      Salva às{" "}
+                      {savedAt.toLocaleTimeString("pt-BR", {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit",
+                      })}
+                      . Você pode fechar esta janela.
+                    </span>
+                  </div>
+                </div>
+              ) : null}
+              {hasUnsavedChanges ? (
+                <div className="mt-4 flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  <TriangleAlert className="size-5 shrink-0" />
+                  <span>
+                    <strong>Alterações ainda não salvas.</strong> Clique em
+                    “Salvar alterações” para confirmar novamente no banco.
+                  </span>
+                </div>
+              ) : null}
             </div>
             <footer className="flex justify-end gap-2 border-t bg-slate-50 px-5 py-3">
               <Button variant="outline" onClick={() => setEditing(false)}>
-                Cancelar
+                {savedAt ? "Fechar" : "Cancelar"}
               </Button>
               <Button
                 disabled={
@@ -2793,7 +2834,11 @@ function PlanningIntelligencePanel({
                 ) : (
                   <Save className="size-4" />
                 )}
-                Salvar critérios e IA
+                {hasUnsavedChanges
+                  ? "Salvar alterações"
+                  : savedAt
+                    ? "Salvar novamente"
+                    : "Salvar critérios e IA"}
               </Button>
             </footer>
           </section>
