@@ -149,7 +149,13 @@ export function MachineLoadSimulator() {
       setBoResourcesAvailable(boResponse.ok);
       const mappingPayload = await mappingResponse.json().catch(() => null) as CarcassMappingPayload | null;
       const intelligencePayload = await intelligenceResponse.json().catch(() => null) as IntelligencePayload | null;
-      if (intelligenceResponse.ok && intelligencePayload?.settings) setIntelligence(intelligencePayload);
+      const learningGroups = Array.isArray(intelligencePayload?.groups) ? intelligencePayload.groups : [];
+      if (intelligenceResponse.ok && intelligencePayload?.settings) setIntelligence({
+        ...intelligencePayload,
+        groups: learningGroups,
+        recent: Array.isArray(intelligencePayload.recent) ? intelligencePayload.recent : [],
+        summary: intelligencePayload.summary ?? { observations: 0, predictionsCompared: 0, meanAbsoluteErrorPercent: 0, confidencePercent: 0 },
+      });
       const calendarPayload = await calendarResponse.json().catch(() => null) as RawUnavailability[] | null;
       setUnavailability(calendarResponse.ok && Array.isArray(calendarPayload) ? calendarPayload.map((period) => ({ ...period, startsAt: new Date(period.startsAt), endsAt: new Date(period.endsAt) })) : []);
       const rawOrders = (ordersResult.data ?? []) as RawOrder[];
@@ -169,7 +175,7 @@ export function MachineLoadSimulator() {
         const sheetExtrusion = nestedRecord(sheet?.parameters ?? null, "extrusion");
         const sheetBillet = nestedRecord(sheet?.parameters ?? null, "billet");
         const sourceData = order.source_data ?? {};
-        const learned = intelligencePayload?.groups
+        const learned = learningGroups
           .filter((item) => item.calibrated && item.tool_code.toUpperCase() === order.tool_code.toUpperCase() && item.machine_code === order.machine_code && (!item.tool_sequence || item.tool_sequence === order.sequence))
           .sort((left, right) => Number(right.tool_sequence === order.sequence) - Number(left.tool_sequence === order.sequence))[0];
         const sources: Array<[number, ProductivitySource]> = [[numberValue(learned?.average_actual_productivity_kg_h), "aprendizado"], [numberValue(order.last_productivity_kg_h), "simplificada"], [readSheetProductivity(sheet?.parameters ?? null), "ficha"], [numberValue(tool?.productivity_kg_h), "ferramenta"], [settingMap[order.machine_code]?.defaultProductivityKgH ?? 1000, "padrao"]];
