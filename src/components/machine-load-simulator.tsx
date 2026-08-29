@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   Boxes,
   BrainCircuit,
@@ -305,6 +311,18 @@ interface OpenRouterModelOption {
   pricing: { prompt?: string; completion?: string } | null;
 }
 
+type MachineLoadSectionKey =
+  "intelligence" | "copilot" | "learning" | "thermal" | "alerts" | "simulation";
+
+const machineLoadSectionKeys: MachineLoadSectionKey[] = [
+  "intelligence",
+  "copilot",
+  "learning",
+  "thermal",
+  "alerts",
+  "simulation",
+];
+
 const defaultSettings: MachineLoadSettings = {
   billetBarWeightKg: 415,
   extrusionEfficiency: 0.85,
@@ -520,6 +538,16 @@ export function MachineLoadSimulator() {
   const [manualOrder, setManualOrder] = useState<Record<string, string[]>>({});
   const [machine, setMachine] = useState("all");
   const [tab, setTab] = useState<"timeline" | "gantt" | "billets">("gantt");
+  const [expandedSections, setExpandedSections] = useState<
+    Record<MachineLoadSectionKey, boolean>
+  >({
+    intelligence: false,
+    copilot: false,
+    learning: false,
+    thermal: false,
+    alerts: false,
+    simulation: false,
+  });
   const [startedAt, setStartedAt] = useState<Date | null>(null);
   const [startInput, setStartInput] = useState("");
   const [scenarioPanel, setScenarioPanel] = useState<"save" | "list" | null>(
@@ -1275,6 +1303,22 @@ export function MachineLoadSimulator() {
           : latest,
     null,
   );
+  const allSectionsExpanded = machineLoadSectionKeys.every(
+    (key) => expandedSections[key],
+  );
+  function toggleSection(key: MachineLoadSectionKey) {
+    setExpandedSections((current) => ({
+      ...current,
+      [key]: !current[key],
+    }));
+  }
+  function setAllSections(expanded: boolean) {
+    setExpandedSections(
+      Object.fromEntries(
+        machineLoadSectionKeys.map((key) => [key, expanded]),
+      ) as Record<MachineLoadSectionKey, boolean>,
+    );
+  }
   async function requestAiAnalysis() {
     if (!planningAnalysis || !startedAt) return;
     setAiBusy(true);
@@ -1579,113 +1623,215 @@ export function MachineLoadSimulator() {
           tone="green"
         />
       </section>
+      <section className="flex flex-col gap-3 rounded-2xl border bg-white px-4 py-3 shadow-sm sm:flex-row sm:items-center">
+        <div className="flex-1">
+          <h2 className="font-heading font-bold text-slate-950">
+            Seções da Carga Máquina
+          </h2>
+          <p className="text-xs text-slate-500">
+            Abra somente o que precisa consultar. Os riscos continuam resumidos
+            mesmo com as seções fechadas.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setAllSections(true)}
+            disabled={allSectionsExpanded}
+          >
+            <ChevronDown className="size-4" /> Expandir tudo
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setAllSections(false)}
+            disabled={machineLoadSectionKeys.every(
+              (key) => !expandedSections[key],
+            )}
+          >
+            <ChevronUp className="size-4" /> Recolher tudo
+          </Button>
+        </div>
+      </section>
+
       {planningAnalysis ? (
-        <PlanningIntelligencePanel
-          analysis={planningAnalysis}
-          weights={intelligence.settings}
-          canEdit={canPlan && !historicalScenario}
-          aiConfigured={Boolean(intelligence.aiConfigured)}
-          aiAnalysis={aiAnalysis}
-          aiBusy={aiBusy}
-          aiError={aiError}
+        <CollapsibleDashboardSection
+          title="Inteligência explicável e copiloto de decisão"
+          summary={`Nota ${planningAnalysis.score.overall} de 100 · ${planningAnalysis.summary.conflicts} bloqueio(s) · ${planningAnalysis.summary.predictedIdleMinutes} min de espera previstos`}
+          expanded={expandedSections.intelligence}
+          onToggle={() => toggleSection("intelligence")}
+          tone={planningAnalysis.summary.conflicts ? "red" : "violet"}
+        >
+          <PlanningIntelligencePanel
+            analysis={planningAnalysis}
+            weights={intelligence.settings}
+            canEdit={canPlan && !historicalScenario}
+            aiConfigured={Boolean(intelligence.aiConfigured)}
+            onSave={saveIntelligenceWeights}
+          />
+        </CollapsibleDashboardSection>
+      ) : null}
+
+      <CollapsibleDashboardSection
+        title="Copiloto de decisão"
+        summary={
+          aiBusy
+            ? "Análise em andamento"
+            : aiAnalysis
+              ? `${aiAnalysis.result.recommendations.length} orientação(ões) · cenário para avaliação`
+              : "Analise a sequência e receba um cenário alternativo explicado passo a passo"
+        }
+        expanded={expandedSections.copilot}
+        onToggle={() => toggleSection("copilot")}
+        tone="violet"
+      >
+        <AiDecisionPanel
+          configured={Boolean(intelligence.aiConfigured)}
+          enabled={intelligence.settings.aiEnabled}
+          analysis={aiAnalysis}
+          busy={aiBusy}
+          error={aiError}
           onAnalyze={() => void requestAiAnalysis()}
-          onApplyAiScenario={applyAiScenario}
+          onApplyScenario={applyAiScenario}
           orderLabels={Object.fromEntries(
             simulation.machines.flatMap((machine) =>
               machine.items.map((item) => [item.id, item.toolCode]),
             ),
           )}
-          onSave={saveIntelligenceWeights}
         />
-      ) : null}
-      <PlanningLearningPanel data={intelligence} />
-      <ThermalCoveragePanel machines={simulation.machines} />
-      <ConstraintPanel simulation={simulation} />
-      <AlloyWarnings machines={simulation.machines} />
-      <BilletStockWarnings
-        billets={simulation.billets}
-        stock={displayedBilletStock}
-        available={hasBilletStockSnapshot}
-      />
-      <PressResourceWarnings
-        machines={simulation.machines}
-        resources={displayedCarcassResources}
-        available={hasCarcassSnapshot}
-      />
-      <BoResourceWarnings
-        machines={simulation.machines}
-        resources={displayedBoResources}
-        available={hasBoSnapshot}
-      />
-      <OperationalCalendarPanel
-        periods={displayedUnavailability}
-        machines={simulation.machines.map((item) => item.machineCode)}
+      </CollapsibleDashboardSection>
+
+      <PlanningLearningPanel
+        data={intelligence}
+        expanded={expandedSections.learning}
+        onToggle={() => toggleSection("learning")}
       />
 
-      <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
-        <div className="flex flex-col gap-3 border-b px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <h2 className="font-heading font-bold text-slate-900">
-              Simulação operacional
-            </h2>
-            <p className="text-xs text-slate-500">
-              Prensa + ferramenta/forno + carcaça + tarugo/liga.
-            </p>
+      <CollapsibleDashboardSection
+        title="Prontidão térmica das prensas"
+        summary={`${simulation.machines.filter((item) => item.thermalCoverage.status === "risk").length} prensa(s) com risco · ${simulation.machines.filter((item) => item.thermalCoverage.status === "attention").length} em atenção`}
+        expanded={expandedSections.thermal}
+        onToggle={() => toggleSection("thermal")}
+        tone={
+          simulation.machines.some(
+            (item) => item.thermalCoverage.status === "risk",
+          )
+            ? "red"
+            : "amber"
+        }
+      >
+        <ThermalCoveragePanel machines={simulation.machines} />
+      </CollapsibleDashboardSection>
+
+      <CollapsibleDashboardSection
+        title="Alertas, materiais e recursos compartilhados"
+        summary={`${simulation.conflicts.filter((item) => item.severity === "blocking").length} impedimento(s) · carcaças, BOs, tarugos e calendário`}
+        expanded={expandedSections.alerts}
+        onToggle={() => toggleSection("alerts")}
+        tone={
+          simulation.conflicts.some((item) => item.severity === "blocking")
+            ? "red"
+            : "amber"
+        }
+      >
+        <ConstraintPanel simulation={simulation} />
+        <AlloyWarnings machines={simulation.machines} />
+        <BilletStockWarnings
+          billets={simulation.billets}
+          stock={displayedBilletStock}
+          available={hasBilletStockSnapshot}
+        />
+        <PressResourceWarnings
+          machines={simulation.machines}
+          resources={displayedCarcassResources}
+          available={hasCarcassSnapshot}
+        />
+        <BoResourceWarnings
+          machines={simulation.machines}
+          resources={displayedBoResources}
+          available={hasBoSnapshot}
+        />
+        <OperationalCalendarPanel
+          periods={displayedUnavailability}
+          machines={simulation.machines.map((item) => item.machineCode)}
+        />
+      </CollapsibleDashboardSection>
+
+      <CollapsibleDashboardSection
+        title="Simulação operacional"
+        summary={`${simulation.machines.reduce((sum, item) => sum + item.items.length, 0)} itens · término ${formatDateTime(estimatedEnd)} · Gantt, tabela e tarugos`}
+        expanded={expandedSections.simulation}
+        onToggle={() => toggleSection("simulation")}
+        tone="blue"
+      >
+        <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
+          <div className="flex flex-col gap-3 border-b px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <h2 className="font-heading font-bold text-slate-900">
+                Simulação operacional
+              </h2>
+              <p className="text-xs text-slate-500">
+                Prensa + ferramenta/forno + carcaça + tarugo/liga.
+              </p>
+            </div>
+            <div className="flex rounded-xl bg-slate-100 p-1">
+              <button
+                type="button"
+                onClick={() => setTab("gantt")}
+                className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "gantt" ? "bg-white shadow-sm" : "text-slate-500"}`}
+              >
+                <Columns3 className="mr-1 inline size-3.5" />
+                Gantt
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab("timeline")}
+                className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "timeline" ? "bg-white shadow-sm" : "text-slate-500"}`}
+              >
+                <Clock3 className="mr-1 inline size-3.5" />
+                Tabela
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab("billets")}
+                className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "billets" ? "bg-white shadow-sm" : "text-slate-500"}`}
+              >
+                <PackageOpen className="mr-1 inline size-3.5" />
+                Tarugo
+              </button>
+            </div>
           </div>
-          <div className="flex rounded-xl bg-slate-100 p-1">
-            <button
-              type="button"
-              onClick={() => setTab("gantt")}
-              className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "gantt" ? "bg-white shadow-sm" : "text-slate-500"}`}
-            >
-              <Columns3 className="mr-1 inline size-3.5" />
-              Gantt
-            </button>
-            <button
-              type="button"
-              onClick={() => setTab("timeline")}
-              className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "timeline" ? "bg-white shadow-sm" : "text-slate-500"}`}
-            >
-              <Clock3 className="mr-1 inline size-3.5" />
-              Tabela
-            </button>
-            <button
-              type="button"
-              onClick={() => setTab("billets")}
-              className={`rounded-lg px-3 py-2 text-xs font-bold ${tab === "billets" ? "bg-white shadow-sm" : "text-slate-500"}`}
-            >
-              <PackageOpen className="mr-1 inline size-3.5" />
-              Tarugo
-            </button>
-          </div>
+          {tab === "gantt" ? (
+            <GanttChart machines={simulation.machines} />
+          ) : tab === "timeline" ? (
+            <Timeline
+              machines={simulation.machines}
+              projectedBalances={projectedBilletBalances(simulation)}
+              manual={!historicalScenario && mode === "manual"}
+              onMove={moveManualOrder}
+            />
+          ) : (
+            <BilletTable
+              billets={simulation.billets}
+              settings={settings}
+              stock={displayedBilletStock}
+              available={hasBilletStockSnapshot}
+            />
+          )}
+        </section>
+        <div className="flex items-start gap-2 rounded-xl bg-blue-50 px-4 py-3 text-xs text-blue-800">
+          <Settings2 className="mt-0.5 size-4 shrink-0" />
+          <p>
+            <strong>Premissas atuais:</strong> peso, eficiência, tempo térmico e
+            quantidade de vagas seguem a configuração de cada prensa.
+            Ferramentas, carcaças e BOs compartilhados são protegidos contra uso
+            simultâneo; a aprovação só ocorre com estoque físico suficiente.
+          </p>
         </div>
-        {tab === "gantt" ? (
-          <GanttChart machines={simulation.machines} />
-        ) : tab === "timeline" ? (
-          <Timeline
-            machines={simulation.machines}
-            projectedBalances={projectedBilletBalances(simulation)}
-            manual={!historicalScenario && mode === "manual"}
-            onMove={moveManualOrder}
-          />
-        ) : (
-          <BilletTable
-            billets={simulation.billets}
-            settings={settings}
-            stock={displayedBilletStock}
-            available={hasBilletStockSnapshot}
-          />
-        )}
-      </section>
-      <div className="flex items-start gap-2 rounded-xl bg-blue-50 px-4 py-3 text-xs text-blue-800">
-        <Settings2 className="mt-0.5 size-4 shrink-0" />
-        <p>
-          <strong>Premissas atuais:</strong> peso, eficiência, tempo térmico e
-          quantidade de vagas seguem a configuração de cada prensa. Ferramentas,
-          carcaças e BOs compartilhados são protegidos contra uso simultâneo; a
-          aprovação só ocorre com estoque físico suficiente.
-        </p>
-      </div>
+      </CollapsibleDashboardSection>
       {scenarioPanel ? (
         <ScenarioDialog
           mode={scenarioPanel}
@@ -2169,6 +2315,66 @@ function CompareMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function CollapsibleDashboardSection({
+  title,
+  summary,
+  expanded,
+  onToggle,
+  children,
+  tone = "slate",
+}: {
+  title: string;
+  summary: string;
+  expanded: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+  tone?: "slate" | "violet" | "amber" | "red" | "blue";
+}) {
+  const toneClasses = {
+    slate: "bg-slate-100 text-slate-700",
+    violet: "bg-violet-100 text-violet-700",
+    amber: "bg-amber-100 text-amber-800",
+    red: "bg-red-100 text-red-700",
+    blue: "bg-blue-100 text-blue-700",
+  }[tone];
+  return (
+    <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={onToggle}
+        className="flex w-full items-center gap-3 px-5 py-4 text-left transition hover:bg-slate-50"
+      >
+        <span
+          className={`grid size-10 shrink-0 place-items-center rounded-xl ${toneClasses}`}
+        >
+          {expanded ? (
+            <ChevronUp className="size-5" />
+          ) : (
+            <ChevronDown className="size-5" />
+          )}
+        </span>
+        <span className="min-w-0 flex-1">
+          <strong className="block font-heading text-base text-slate-950">
+            {title}
+          </strong>
+          <span className="block truncate text-xs text-slate-500">
+            {summary}
+          </span>
+        </span>
+        <span className="shrink-0 rounded-lg border bg-white px-3 py-2 text-xs font-bold text-slate-600">
+          {expanded ? "Recolher" : "Expandir"}
+        </span>
+      </button>
+      {expanded ? (
+        <div className="space-y-3 border-t bg-slate-50/50 p-3 sm:p-4">
+          {children}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function ConstraintPanel({
   simulation,
 }: {
@@ -2234,24 +2440,12 @@ function PlanningIntelligencePanel({
   weights,
   canEdit,
   aiConfigured,
-  aiAnalysis,
-  aiBusy,
-  aiError,
-  onAnalyze,
-  onApplyAiScenario,
-  orderLabels,
   onSave,
 }: {
   analysis: PlanningAnalysis;
   weights: IntelligenceWeights;
   canEdit: boolean;
   aiConfigured: boolean;
-  aiAnalysis: AiAnalysisEnvelope | null;
-  aiBusy: boolean;
-  aiError: string;
-  onAnalyze: () => void;
-  onApplyAiScenario: () => void;
-  orderLabels: Record<string, string>;
   onSave: (weights: IntelligenceWeights) => Promise<IntelligenceWeights>;
 }) {
   const [editing, setEditing] = useState(false);
@@ -2572,16 +2766,6 @@ function PlanningIntelligencePanel({
           ) : null}
         </div>
       </div>
-      <AiDecisionPanel
-        configured={aiConfigured}
-        enabled={weights.aiEnabled}
-        analysis={aiAnalysis}
-        busy={aiBusy}
-        error={aiError}
-        onAnalyze={onAnalyze}
-        onApplyScenario={onApplyAiScenario}
-        orderLabels={orderLabels}
-      />
       {editing ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 p-4">
           <section className="flex max-h-[94dvh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border bg-white shadow-2xl">
@@ -2987,7 +3171,7 @@ function AiDecisionPanel({
     opportunity: "Oportunidade",
   } as const;
   return (
-    <div className="border-t bg-gradient-to-r from-violet-50/80 via-white to-blue-50/70 p-5">
+    <div className="rounded-xl bg-gradient-to-r from-violet-50/80 via-white to-blue-50/70 p-5">
       <div className="flex flex-col gap-3 md:flex-row md:items-center">
         <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-violet-600 text-white">
           <BrainCircuit className="size-5" />
@@ -3182,7 +3366,6 @@ function AiDecisionPanel({
             {analysis.result.recommendations.map((item, index) => (
               <details
                 key={`${item.title}-${index}`}
-                open={index < 2}
                 className={`rounded-xl border bg-white ${item.priority === "critical" ? "border-red-200" : item.priority === "high" ? "border-amber-200" : "border-slate-200"}`}
               >
                 <summary className="flex cursor-pointer list-none items-start gap-2 p-3">
@@ -3310,8 +3493,15 @@ function NumberSetting({
   );
 }
 
-function PlanningLearningPanel({ data }: { data: IntelligencePayload }) {
-  const [expanded, setExpanded] = useState(false);
+function PlanningLearningPanel({
+  data,
+  expanded,
+  onToggle,
+}: {
+  data: IntelligencePayload;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
   const confidence = data.summary.confidencePercent;
   const learningMessage =
     data.summary.observations === 0
@@ -3325,7 +3515,8 @@ function PlanningLearningPanel({ data }: { data: IntelligencePayload }) {
     <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
       <button
         type="button"
-        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        onClick={onToggle}
         className="flex w-full items-center gap-3 px-5 py-4 text-left"
       >
         <span className="grid size-10 place-items-center rounded-xl bg-violet-50 text-violet-600">
@@ -3336,12 +3527,18 @@ function PlanningLearningPanel({ data }: { data: IntelligencePayload }) {
             Aprendizado operacional
           </p>
           <h2 className="font-heading font-black">
-            O que o sistema aprendeu com a produção
+            {data.summary.observations} produções registradas · segurança{" "}
+            {formatNumber(confidence, 0)}%
           </h2>
           <p className="text-xs text-slate-500">{learningMessage}</p>
         </div>
-        <span className="text-xs font-bold text-slate-500">
-          {expanded ? "Recolher" : "Ver calibração"}
+        <span className="flex items-center gap-2 rounded-lg border bg-white px-3 py-2 text-xs font-bold text-slate-600">
+          {expanded ? (
+            <ChevronUp className="size-4" />
+          ) : (
+            <ChevronDown className="size-4" />
+          )}
+          {expanded ? "Recolher" : "Expandir"}
         </span>
       </button>
       {expanded ? (
