@@ -78,6 +78,11 @@ interface RawTool {
   productivity_kg_h: string | null;
   holes: number | null;
   bo: string | null;
+  sequence_number: number | null;
+  source_available: boolean | null;
+  package_measure_mm: number | string | null;
+  carcass_diameter_mm: number | string | null;
+  carcass_code: string | null;
 }
 interface RawSetting {
   machine_code: string;
@@ -269,6 +274,16 @@ interface AiPlanningAnalysis {
   }>;
   assumptions: string[];
   missingData: string[];
+  proposedScenario: {
+    title: string;
+    rationale: string;
+    expectedBenefits: string[];
+    risks: string[];
+    machines: Array<{
+      machineCode: string;
+      orderedOrderIds: string[];
+    }>;
+  };
 }
 interface AiAnalysisEnvelope {
   result: AiPlanningAnalysis;
@@ -403,6 +418,7 @@ function aiDecisionPacket(
       machineCode: machine.machineCode,
       thermalCoverage: machine.thermalCoverage,
       items: machine.items.map((item, index) => ({
+        orderId: item.id,
         position: index + 1,
         toolCode: item.toolCode,
         orderNumber: item.orderNumber,
@@ -566,8 +582,13 @@ export function MachineLoadSimulator() {
           .eq("is_active", true),
         supabase
           .from("tools")
-          .select("code,matrix_code,productivity_kg_h,holes,bo")
-          .eq("organization_id", organizationId),
+          .select(
+            "code,matrix_code,productivity_kg_h,holes,bo,sequence_number,source_available,package_measure_mm,carcass_diameter_mm,carcass_code",
+          )
+          .eq("organization_id", organizationId)
+          .order("matrix_code")
+          .order("source_available", { ascending: false })
+          .order("sequence_number"),
         supabase
           .from("tool_heating_cycle_orders")
           .select(
@@ -774,10 +795,12 @@ export function MachineLoadSimulator() {
         const packageMeasureMm =
           numberValue(order.package_measure_mm) ||
           numberValue(sourceData.medidaPacote) ||
+          numberValue(tool?.package_measure_mm) ||
           null;
         const carcassDiameterMm =
           numberValue(order.carcass_diameter_mm) ||
           numberValue(sourceData.diametro) ||
+          numberValue(tool?.carcass_diameter_mm) ||
           null;
         const derivedCarcass =
           packageMeasureMm && carcassDiameterMm
@@ -822,6 +845,7 @@ export function MachineLoadSimulator() {
               sourceData.carcaca,
               sourceData.carcassCode,
               sheetBillet.casing,
+              tool?.carcass_code,
               mapping?.carcassCode,
             ) || null,
           carcassQuantity: mapping?.quantity ?? 1,
@@ -1295,6 +1319,29 @@ export function MachineLoadSimulator() {
     }
     setMode("manual");
   }
+  function applyAiScenario() {
+    const proposed = aiAnalysis?.result.proposedScenario;
+    if (!proposed?.machines.length) return;
+    setManualOrder(
+      Object.fromEntries(
+        proposed.machines.map((item) => [
+          item.machineCode,
+          item.orderedOrderIds,
+        ]),
+      ),
+    );
+    setMode("manual");
+    setScenarioId(null);
+    setHistoricalScenario(null);
+    setScenarioName(proposed.title);
+    setScenarioDescription(
+      `Cenário proposto pela IA para avaliação do PCP. ${proposed.rationale}`,
+    );
+    setScenarioNotice(
+      "Cenário da IA carregado no modo manual. O motor recalculou tempos, recursos e bloqueios; revise e salve se quiser comparar.",
+    );
+    setTab("timeline");
+  }
   function moveManualOrder(
     machineCode: string,
     draggedId: string,
@@ -1533,6 +1580,12 @@ export function MachineLoadSimulator() {
           aiBusy={aiBusy}
           aiError={aiError}
           onAnalyze={() => void requestAiAnalysis()}
+          onApplyAiScenario={applyAiScenario}
+          orderLabels={Object.fromEntries(
+            simulation.machines.flatMap((machine) =>
+              machine.items.map((item) => [item.id, item.toolCode]),
+            ),
+          )}
           onSave={saveIntelligenceWeights}
         />
       ) : null}
@@ -2176,6 +2229,8 @@ function PlanningIntelligencePanel({
   aiBusy,
   aiError,
   onAnalyze,
+  onApplyAiScenario,
+  orderLabels,
   onSave,
 }: {
   analysis: PlanningAnalysis;
@@ -2186,6 +2241,8 @@ function PlanningIntelligencePanel({
   aiBusy: boolean;
   aiError: string;
   onAnalyze: () => void;
+  onApplyAiScenario: () => void;
+  orderLabels: Record<string, string>;
   onSave: (weights: IntelligenceWeights) => Promise<IntelligenceWeights>;
 }) {
   const [editing, setEditing] = useState(false);
@@ -2474,6 +2531,8 @@ function PlanningIntelligencePanel({
         busy={aiBusy}
         error={aiError}
         onAnalyze={onAnalyze}
+        onApplyScenario={onApplyAiScenario}
+        orderLabels={orderLabels}
       />
       {editing ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 p-4">
@@ -2855,6 +2914,8 @@ function AiDecisionPanel({
   busy,
   error,
   onAnalyze,
+  onApplyScenario,
+  orderLabels,
 }: {
   configured: boolean;
   enabled: boolean;
@@ -2862,6 +2923,8 @@ function AiDecisionPanel({
   busy: boolean;
   error: string;
   onAnalyze: () => void;
+  onApplyScenario: () => void;
+  orderLabels: Record<string, string>;
 }) {
   const decisionLabels = {
     approve: "Aprovar",
@@ -2943,7 +3006,80 @@ function AiDecisionPanel({
               </div>
             ) : null}
           </article>
-          <div className="grid gap-2">
+          <div className="grid gap-3">
+            <article className="rounded-2xl border border-violet-200 bg-white p-4 shadow-sm">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+                <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-violet-100 text-violet-700">
+                  <Route className="size-4" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[10px] font-black uppercase tracking-wide text-violet-600">
+                    Cenário alternativo da IA
+                  </p>
+                  <h4 className="font-heading font-black">
+                    {analysis.result.proposedScenario.title}
+                  </h4>
+                  <p className="mt-1 text-xs leading-5 text-slate-600">
+                    {analysis.result.proposedScenario.rationale}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  onClick={onApplyScenario}
+                  className="shrink-0 bg-violet-600 text-white hover:bg-violet-700"
+                >
+                  <Sparkles className="size-4" />
+                  Avaliar na simulação
+                </Button>
+              </div>
+              <div className="mt-3 grid gap-2">
+                {analysis.result.proposedScenario.machines.map((machine) => (
+                  <div
+                    key={machine.machineCode}
+                    className="rounded-xl bg-slate-50 p-3"
+                  >
+                    <strong className="text-xs">
+                      {machineLabel(machine.machineCode)}
+                    </strong>
+                    <div className="mt-2 flex flex-wrap items-center gap-1">
+                      {machine.orderedOrderIds.map((orderId, index) => (
+                        <span
+                          key={orderId}
+                          className="rounded-full border bg-white px-2 py-1 font-mono text-[10px] font-bold text-slate-700"
+                        >
+                          {String(index + 1).padStart(2, "0")} ·{" "}
+                          {orderLabels[orderId] || "Ordem"}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                <div className="rounded-xl bg-emerald-50 p-3 text-xs text-emerald-800">
+                  <strong>Ganhos esperados</strong>
+                  <ul className="mt-1 list-disc space-y-1 pl-4">
+                    {analysis.result.proposedScenario.expectedBenefits.map(
+                      (item) => (
+                        <li key={item}>{item}</li>
+                      ),
+                    )}
+                  </ul>
+                </div>
+                <div className="rounded-xl bg-amber-50 p-3 text-xs text-amber-900">
+                  <strong>Pontos para validar</strong>
+                  <ul className="mt-1 list-disc space-y-1 pl-4">
+                    {analysis.result.proposedScenario.risks.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+              <p className="mt-3 text-[10px] font-semibold text-slate-500">
+                A IA não aprova nem altera a produção sozinha. Ao avaliar, o
+                cenário entra no modo manual e é recalculado pelo AluPilot.
+              </p>
+            </article>
             {analysis.result.recommendations.map((item, index) => (
               <details
                 key={`${item.title}-${index}`}

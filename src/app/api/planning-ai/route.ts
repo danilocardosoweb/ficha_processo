@@ -39,6 +39,20 @@ const aiResultSchema = z.object({
     .max(12),
   assumptions: z.array(z.string().max(300)).max(10),
   missingData: z.array(z.string().max(300)).max(10),
+  proposedScenario: z.object({
+    title: z.string().min(3).max(140),
+    rationale: z.string().min(20).max(1200),
+    expectedBenefits: z.array(z.string().max(300)).max(8),
+    risks: z.array(z.string().max(300)).max(8),
+    machines: z
+      .array(
+        z.object({
+          machineCode: z.string().min(1).max(30),
+          orderedOrderIds: z.array(z.string().min(1).max(100)).max(200),
+        }),
+      )
+      .max(10),
+  }),
 });
 
 const outputSchema = {
@@ -51,6 +65,7 @@ const outputSchema = {
     "recommendations",
     "assumptions",
     "missingData",
+    "proposedScenario",
   ],
   properties: {
     executiveSummary: { type: "string" },
@@ -87,8 +102,93 @@ const outputSchema = {
     },
     assumptions: { type: "array", items: { type: "string" } },
     missingData: { type: "array", items: { type: "string" } },
+    proposedScenario: {
+      type: "object",
+      additionalProperties: false,
+      required: ["title", "rationale", "expectedBenefits", "risks", "machines"],
+      properties: {
+        title: { type: "string" },
+        rationale: { type: "string" },
+        expectedBenefits: { type: "array", items: { type: "string" } },
+        risks: { type: "array", items: { type: "string" } },
+        machines: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["machineCode", "orderedOrderIds"],
+            properties: {
+              machineCode: { type: "string" },
+              orderedOrderIds: { type: "array", items: { type: "string" } },
+            },
+          },
+        },
+      },
+    },
   },
 } as const;
+
+function normalizeProposedScenario(
+  result: z.infer<typeof aiResultSchema>,
+  packet: z.infer<typeof packetSchema>,
+) {
+  const originalByMachine = new Map<string, string[]>();
+  for (const rawMachine of packet.machines) {
+    const machineCode = String(rawMachine.machineCode ?? "").trim();
+    const items = Array.isArray(rawMachine.items) ? rawMachine.items : [];
+    const orderIds = items
+      .map((rawItem) => {
+        const item =
+          rawItem && typeof rawItem === "object"
+            ? (rawItem as Record<string, unknown>)
+            : {};
+        return String(item.orderId ?? "").trim();
+      })
+      .filter(Boolean);
+    if (machineCode && orderIds.length)
+      originalByMachine.set(machineCode, orderIds);
+  }
+
+  const proposedByMachine = new Map(
+    result.proposedScenario.machines.map((item) => [item.machineCode, item]),
+  );
+  const machines = [...originalByMachine.entries()].map(
+    ([machineCode, originalOrderIds]) => {
+      const allowed = new Set(originalOrderIds);
+      const seen = new Set<string>();
+      const proposed =
+        proposedByMachine.get(machineCode)?.orderedOrderIds ?? [];
+      const valid = proposed.filter((orderId) => {
+        if (!allowed.has(orderId) || seen.has(orderId)) return false;
+        seen.add(orderId);
+        return true;
+      });
+      return {
+        machineCode,
+        orderedOrderIds: [
+          ...valid,
+          ...originalOrderIds.filter((orderId) => !seen.has(orderId)),
+        ],
+      };
+    },
+  );
+  return {
+    ...result,
+    proposedScenario: { ...result.proposedScenario, machines },
+  };
+}
+
+function friendlyAiError(cause: unknown) {
+  if (cause instanceof z.ZodError || cause instanceof SyntaxError)
+    return "O modelo devolveu uma resposta incompleta. Tente novamente; o AluPilot escolherá outro modelo automaticamente.";
+  const message =
+    cause instanceof Error ? cause.message : "Falha inesperada na análise.";
+  if (/json|schema|structured|formato|conte[uú]do/i.test(message))
+    return "O modelo não concluiu o cenário no formato esperado. Tente novamente para usar a rota de reserva.";
+  if (/timeout|timed out|aborted/i.test(message))
+    return "A análise demorou além do limite. Tente novamente em instantes.";
+  return "A IA ficou temporariamente indisponível. A simulação e a análise determinística continuam válidas.";
+}
 
 async function context() {
   const token = await getSessionToken();
@@ -214,6 +314,7 @@ export async function POST(request: Request) {
   const requestHash = createHash("sha256")
     .update(
       JSON.stringify({
+        schemaVersion: 2,
         packet: parsed.data,
         model: settings.aiModel,
         personality: settings.aiPersonalityPrompt,
@@ -232,87 +333,131 @@ export async function POST(request: Request) {
       : String(settings.aiModel || "openrouter/auto");
   const started = Date.now();
   try {
-    const response = await fetch(
-      "https://openrouter.ai/api/v1/chat/completions",
-      {
-        method: "POST",
-        signal: AbortSignal.timeout(60_000),
-        headers: {
-          Authorization: `Bearer ${key}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": process.env.APP_URL || "http://localhost:3000",
-          "X-OpenRouter-Title": "AluPilot",
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: "system",
-              content: `${String(settings.aiPersonalityPrompt)}\n\nCRITÉRIOS CONFIGURÁVEIS:\n${String(settings.aiAnalysisCriteria)}\n\nREGRAS DE SEGURANÇA: use somente os dados fornecidos; diferencie fato, inferência e dado ausente; nunca altere cálculos físicos; bloqueios determinísticos são soberanos; não invente estoques, tempos ou capacidades; responda em português do Brasil.`,
+    const modelAttempts =
+      settings.aiModelMode === "auto"
+        ? ["openrouter/auto", "deepseek/deepseek-v4-flash-0731"]
+        : [model];
+    let completed:
+      | {
+          result: z.infer<typeof aiResultSchema>;
+          modelUsed: string;
+          usage: Record<string, unknown>;
+        }
+      | undefined;
+    let lastFailure: unknown;
+    for (const attemptedModel of modelAttempts) {
+      try {
+        const response = await fetch(
+          "https://openrouter.ai/api/v1/chat/completions",
+          {
+            method: "POST",
+            signal: AbortSignal.timeout(60_000),
+            headers: {
+              Authorization: `Bearer ${key}`,
+              "Content-Type": "application/json",
+              "HTTP-Referer": process.env.APP_URL || "http://localhost:3000",
+              "X-OpenRouter-Title": "AluPilot",
             },
-            {
-              role: "user",
-              content: `Analise o pacote compacto desta simulação e produza no máximo ${Number(settings.aiMaxRecommendations) || 6} recomendações priorizadas. Dê preferência a ações que evitem parada das prensas e possam ser executadas pelo PCP.\n\n${JSON.stringify(parsed.data)}`,
-            },
-          ],
-          temperature: 0.2,
-          max_tokens: 1800,
-          provider: {
-            require_parameters: true,
-            allow_fallbacks: true,
-            data_collection: "deny",
+            body: JSON.stringify({
+              model: attemptedModel,
+              messages: [
+                {
+                  role: "system",
+                  content: `${String(settings.aiPersonalityPrompt)}\n\nCRITÉRIOS CONFIGURÁVEIS:\n${String(settings.aiAnalysisCriteria)}\n\nREGRAS DE SEGURANÇA: use somente os dados fornecidos; diferencie fato, inferência e dado ausente; nunca altere cálculos físicos; bloqueios determinísticos são soberanos; não invente estoques, tempos ou capacidades; responda em português do Brasil.`,
+                },
+                {
+                  role: "user",
+                  content: `Analise o pacote compacto desta simulação e produza no máximo ${Number(settings.aiMaxRecommendations) || 6} recomendações priorizadas. Além da análise, crie obrigatoriamente um cenário alternativo de sequenciamento para avaliação do PCP. Em proposedScenario, reorganize apenas os orderId existentes dentro da própria prensa; use cada orderId exatamente uma vez, não transfira ordens entre prensas e não invente ordens. Dê preferência a ações que evitem parada das prensas, respeitando bloqueios físicos, carcaças, BOs, ligas, prazo, cobertura térmica, volume e produtividade. O cenário será recalculado pelo motor determinístico antes de poder ser aprovado.\n\n${JSON.stringify(parsed.data)}`,
+                },
+              ],
+              temperature: 0.2,
+              max_tokens: 3000,
+              provider: {
+                require_parameters: true,
+                allow_fallbacks: true,
+                data_collection: "deny",
+              },
+              response_format: {
+                type: "json_schema",
+                json_schema: {
+                  name: "alupilot_planning_analysis",
+                  strict: true,
+                  schema: outputSchema,
+                },
+              },
+            }),
           },
-          response_format: {
-            type: "json_schema",
-            json_schema: {
-              name: "alupilot_planning_analysis",
-              strict: true,
-              schema: outputSchema,
-            },
+        );
+        const body = (await response.json()) as {
+          error?: { message?: string };
+          model?: string;
+          usage?: Record<string, unknown>;
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        if (!response.ok)
+          throw new Error(
+            body.error?.message || `OpenRouter respondeu ${response.status}.`,
+          );
+        const content = body.choices?.[0]?.message?.content;
+        if (!content)
+          throw new Error("O modelo não devolveu conteúdo estruturado.");
+        const validated = normalizeProposedScenario(
+          aiResultSchema.parse(JSON.parse(content)),
+          parsed.data,
+        );
+        completed = {
+          result: {
+            ...validated,
+            recommendations: validated.recommendations.slice(
+              0,
+              Number(settings.aiMaxRecommendations) || 6,
+            ),
           },
-        }),
-      },
-    );
-    const body = (await response.json()) as {
-      error?: { message?: string };
-      model?: string;
-      usage?: Record<string, unknown>;
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    if (!response.ok)
-      throw new Error(
-        body.error?.message || `OpenRouter respondeu ${response.status}.`,
-      );
-    const result = aiResultSchema.parse(
-      JSON.parse(body.choices?.[0]?.message?.content || "{}"),
-    );
+          modelUsed: body.model ?? attemptedModel,
+          usage: body.usage ?? {},
+        };
+        break;
+      } catch (cause) {
+        lastFailure = cause;
+      }
+    }
+    if (!completed) {
+      throw lastFailure instanceof Error
+        ? new Error(
+            `Os modelos disponíveis não entregaram uma resposta válida: ${lastFailure.message}`,
+          )
+        : new Error(
+            "Os modelos disponíveis não entregaram uma resposta válida.",
+          );
+    }
     const durationMs = Date.now() - started;
     await ctx.supabase.rpc("local_save_planning_ai_analysis", {
       p_token: ctx.token,
       p_request_hash: requestHash,
       p_model_requested: model,
-      p_model_used: body.model ?? model,
+      p_model_used: completed.modelUsed,
       p_status: "completed",
       p_input_summary: {
         machines: parsed.data.machines.length,
         materials: parsed.data.materials.length,
       },
-      p_result: result,
-      p_usage: body.usage ?? {},
+      p_result: completed.result,
+      p_usage: completed.usage,
       p_duration_ms: durationMs,
       p_error_message: null,
     });
     return NextResponse.json({
-      result,
-      modelUsed: body.model ?? model,
-      usage: body.usage ?? {},
+      result: completed.result,
+      modelUsed: completed.modelUsed,
+      usage: completed.usage,
       durationMs,
       createdAt: new Date().toISOString(),
       cached: false,
     });
   } catch (cause) {
-    const message =
+    const technicalMessage =
       cause instanceof Error ? cause.message : "Falha inesperada na análise.";
+    const message = friendlyAiError(cause);
     await ctx.supabase.rpc("local_save_planning_ai_analysis", {
       p_token: ctx.token,
       p_request_hash: requestHash,
@@ -326,11 +471,11 @@ export async function POST(request: Request) {
       p_result: null,
       p_usage: {},
       p_duration_ms: Date.now() - started,
-      p_error_message: message,
+      p_error_message: technicalMessage.slice(0, 1000),
     });
     return NextResponse.json(
       {
-        error: `A análise determinística continua válida. A IA não respondeu: ${message}`,
+        error: message,
       },
       { status: 502 },
     );
