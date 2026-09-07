@@ -2788,7 +2788,7 @@ function ProductionCompletionDialog({
   const [productivity, setProductivity] = useState(
     Number(defaultProductivity.toFixed(3)),
   );
-  const valid = (kg > 0 || pieces > 0) && productivity > 0;
+  const valid = (kg > 0 || pieces > 0) && productivity > 0 && productivity <= 2500;
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 p-3 backdrop-blur-sm">
       <div className="w-full max-w-xl overflow-hidden rounded-2xl border bg-white shadow-2xl">
@@ -2840,7 +2840,8 @@ function ProductionCompletionDialog({
                 Produtividade alcançada (kg/h)
               </span>
               <Input
-                aria-label="Produtividade alcançada em kg por hora"
+                aria-label="Produtividade alcançada em kg por hora (máximo 2.500)"
+                max="2500"
                 type="number"
                 min="0.001"
                 step="0.001"

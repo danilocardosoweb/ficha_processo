@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { requestOfflineSync } from "@/lib/offline-store";
+import { normalizeProductivityKgH } from "@/modules/planning/productivity";
 import type { SimplifiedRow } from "@/types/database";
 
 type Cell = string | number | boolean | Date | null;
@@ -557,7 +558,7 @@ export function SimplifiedImport() {
             sequence: index + 1,
             status: "planned",
             requires_tool_heating: true,
-            last_productivity_kg_h: row.ultimaProdutividadeKgH || null,
+            last_productivity_kg_h: normalizeProductivityKgH(row.ultimaProdutividadeKgH),
             holes: row.furos && row.furos > 0 ? Math.round(row.furos) : null,
             bo_code: row.bo || null,
             package_measure_mm: row.medidaPacote || null,

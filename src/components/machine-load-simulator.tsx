@@ -36,6 +36,11 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
+import { selectPhysicalTool } from "@/modules/planning/tool-selection";
+import {
+  DEFAULT_PRODUCTIVITY_KG_H,
+  normalizeProductivityKgH,
+} from "@/modules/planning/productivity";
 import {
   simulateMachineLoad,
   type LoadOrderInput,
@@ -326,7 +331,7 @@ const machineLoadSectionKeys: MachineLoadSectionKey[] = [
 const defaultSettings: MachineLoadSettings = {
   billetBarWeightKg: 415,
   extrusionEfficiency: 0.85,
-  defaultProductivityKgH: 1000,
+  defaultProductivityKgH: DEFAULT_PRODUCTIVITY_KG_H,
   setupMinutes: 20,
   alloyChangeMinutes: 15,
   toolHeatingMinutes: 240,
@@ -617,15 +622,21 @@ export function MachineLoadSimulator() {
           .select("tool_code,machine_code,parameters")
           .eq("organization_id", organizationId)
           .eq("is_active", true),
-        supabase
-          .from("tools")
-          .select(
-            "code,matrix_code,productivity_kg_h,holes,bo,sequence_number,source_available,package_measure_mm,carcass_diameter_mm,carcass_code",
-          )
-          .eq("organization_id", organizationId)
-          .order("matrix_code")
-          .order("source_available", { ascending: false })
-          .order("sequence_number"),
+        (async () => {
+          const allTools: RawTool[] = [];
+          const pageSize = 500;
+          for (let offset = 0; ; offset += pageSize) {
+            const page = await supabase.from("tools")
+              .select("code,matrix_code,productivity_kg_h,holes,bo,sequence_number,source_available,package_measure_mm,carcass_diameter_mm,carcass_code")
+              .eq("organization_id", organizationId)
+              .order("id")
+              .range(offset, offset + pageSize - 1);
+            if (page.error) throw page.error;
+            allTools.push(...(page.data ?? []) as RawTool[]);
+            if ((page.data?.length ?? 0) < pageSize) break;
+          }
+          return { data: allTools, error: null };
+        })(),
         supabase
           .from("tool_heating_cycle_orders")
           .select(
@@ -735,9 +746,9 @@ export function MachineLoadSimulator() {
           ? {
               billetBarWeightKg: numberValue(row.billet_bar_weight_kg),
               extrusionEfficiency: numberValue(row.extrusion_efficiency),
-              defaultProductivityKgH: numberValue(
-                row.default_productivity_kg_h,
-              ),
+              defaultProductivityKgH:
+                normalizeProductivityKgH(row.default_productivity_kg_h) ??
+                DEFAULT_PRODUCTIVITY_KG_H,
               setupMinutes: row.setup_minutes,
               alloyChangeMinutes: row.alloy_change_minutes,
               toolHeatingMinutes: row.tool_heating_minutes,
@@ -753,52 +764,48 @@ export function MachineLoadSimulator() {
           : { ...defaultSettings };
       }
       const input = rawOrders.map((order) => {
+        const sourceData = order.source_data ?? {};
+        const requestedToolSequence =
+          Math.round(
+            numberValue(
+              sourceData.sequencia ??
+                sourceData.sequenceNumber ??
+                sourceData.toolSequence,
+            ),
+          ) || null;
         const sheet = rawSheets.find(
           (item) =>
             item.tool_code.toUpperCase() === order.tool_code.toUpperCase() &&
             (!item.machine_code || item.machine_code === order.machine_code),
         );
-        const tool = rawTools.find((item) =>
-          [item.code, item.matrix_code]
-            .filter(Boolean)
-            .some(
-              (code) => code!.toUpperCase() === order.tool_code.toUpperCase(),
-            ),
-        );
+        const tool = selectPhysicalTool(rawTools, order.tool_code, requestedToolSequence);
         const sheetExtrusion = nestedRecord(
           sheet?.parameters ?? null,
           "extrusion",
         );
         const sheetBillet = nestedRecord(sheet?.parameters ?? null, "billet");
-        const sourceData = order.source_data ?? {};
         const learned = learningGroups
           .filter(
             (item) =>
               item.calibrated &&
               item.tool_code.toUpperCase() === order.tool_code.toUpperCase() &&
               item.machine_code === order.machine_code &&
-              (!item.tool_sequence || item.tool_sequence === order.sequence),
+              (!item.tool_sequence || item.tool_sequence === requestedToolSequence),
           )
           .sort(
             (left, right) =>
-              Number(right.tool_sequence === order.sequence) -
-              Number(left.tool_sequence === order.sequence),
+              Number(right.tool_sequence === requestedToolSequence) -
+              Number(left.tool_sequence === requestedToolSequence),
           )[0];
-        const sources: Array<[number, ProductivitySource]> = [
-          [
-            numberValue(learned?.average_actual_productivity_kg_h),
-            "aprendizado",
-          ],
-          [numberValue(order.last_productivity_kg_h), "simplificada"],
-          [readSheetProductivity(sheet?.parameters ?? null), "ficha"],
-          [numberValue(tool?.productivity_kg_h), "ferramenta"],
-          [
-            settingMap[order.machine_code]?.defaultProductivityKgH ?? 1000,
-            "padrao",
-          ],
+        const sources: Array<[number | null, ProductivitySource]> = [
+          [normalizeProductivityKgH(order.last_productivity_kg_h), "simplificada"],
+          [normalizeProductivityKgH(readSheetProductivity(sheet?.parameters ?? null)), "ficha"],
+          [normalizeProductivityKgH(tool?.productivity_kg_h), "ferramenta"],
+          [normalizeProductivityKgH(learned?.average_actual_productivity_kg_h), "aprendizado"],
+          [DEFAULT_PRODUCTIVITY_KG_H, "padrao"],
         ];
-        const productivity = sources.find(([value]) => value > 0) ?? [
-          1000,
+        const productivity = sources.find(([value]) => value !== null) ?? [
+          DEFAULT_PRODUCTIVITY_KG_H,
           "padrao" as const,
         ];
         const cycle = rawCycles.find(
@@ -821,12 +828,12 @@ export function MachineLoadSimulator() {
             item.isActive &&
             item.toolCode.toUpperCase() === order.tool_code.toUpperCase() &&
             (!item.machineCode || item.machineCode === order.machine_code) &&
-            (!item.sequenceNumber || item.sequenceNumber === order.sequence),
+            (!item.sequenceNumber || item.sequenceNumber === requestedToolSequence),
         );
         const mapping = matchingMappings.sort(
           (left, right) =>
-            Number(right.sequenceNumber === order.sequence) -
-              Number(left.sequenceNumber === order.sequence) ||
+            Number(right.sequenceNumber === requestedToolSequence) -
+              Number(left.sequenceNumber === requestedToolSequence) ||
             Number(!!right.machineCode) - Number(!!left.machineCode),
         )[0];
         const packageMeasureMm =
@@ -961,6 +968,8 @@ export function MachineLoadSimulator() {
           {
             carcasses: carcassResources.map((item) => ({
               code: item.carcassCode,
+              totalQuantity: item.totalQuantity,
+              unavailableQuantity: item.unavailableQuantity,
               capacity:
                 item.status === "available"
                   ? Math.max(
@@ -3604,9 +3613,9 @@ function PlanningLearningPanel({
                     <td>{machineLabel(group.machine_code)}</td>
                     <td>{group.sample_count}</td>
                     <td className="font-bold">
-                      {group.average_actual_productivity_kg_h
-                        ? `${formatNumber(group.average_actual_productivity_kg_h, 0)} kg/h`
-                        : "—"}
+                      {normalizeProductivityKgH(group.average_actual_productivity_kg_h)
+                        ? `${formatNumber(normalizeProductivityKgH(group.average_actual_productivity_kg_h)!, 0)} kg/h`
+                        : "Sem medição válida"}
                     </td>
                     <td>
                       {group.mean_absolute_error_percent == null

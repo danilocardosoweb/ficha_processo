@@ -19,7 +19,7 @@ const shiftSchema = z.object({
 const settingSchema = z.object({
   operation: z.literal("setting"),
   machineCode: z.string().trim().min(1).max(20),
-  defaultProductivityKgH: z.number().positive().max(100_000),
+  defaultProductivityKgH: z.number().positive().max(2_500, "A produtividade não pode passar de 2.500 kg/h."),
   billetBarWeightKg: z.number().positive().max(100_000),
   extrusionEfficiencyPct: z.number().positive().max(100),
   setupMinutes: z.number().int().min(0).max(1_440),

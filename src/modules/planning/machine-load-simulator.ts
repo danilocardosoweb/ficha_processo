@@ -1,3 +1,5 @@
+import { safeProductivityKgH } from "@/modules/planning/productivity";
+
 export type ProductivitySource = "simplificada" | "aprendizado" | "ficha" | "ferramenta" | "padrao";
 
 export interface LoadOrderInput {
@@ -71,6 +73,8 @@ export interface ExistingResourceReservation {
 export interface CarcassCapacityInput {
   code: string;
   capacity: number;
+  totalQuantity?: number;
+  unavailableQuantity?: number;
   reservations: ExistingResourceReservation[];
 }
 
@@ -428,7 +432,8 @@ export function simulateMachineLoad(
 
     for (const order of queue) {
       const remainingKg = Math.max(order.targetKg - order.producedKg, 0);
-      if (remainingKg <= 0 || order.productivityKgH <= 0) continue;
+      if (remainingKg <= 0) continue;
+      const productivityKgH = safeProductivityKgH(order.productivityKgH);
       const toolKey = order.toolCode.trim().toUpperCase();
       let readyAt = toolAvailability.get(toolKey) ?? order.toolReadyAt;
       let allocation = toolHeatingAllocation.get(toolKey) ?? null;
@@ -455,7 +460,7 @@ export function simulateMachineLoad(
       const selectedAlloy = chooseAlloy(order, balances, settings);
       const alloyChange = previousAlloy && previousAlloy !== selectedAlloy ? settings.alloyChangeMinutes : 0;
       const preparationMinutes = settings.setupMinutes + alloyChange;
-      const theoreticalMinutes = (remainingKg / order.productivityKgH) * 60;
+      const theoreticalMinutes = (remainingKg / productivityKgH) * 60;
       const itemConflicts: SimulationConflict[] = [];
       const carcassKey = order.carcassCode ? normalizedAlloy(order.carcassCode) : "";
       const carcass = carcassKey ? resources.carcasses.find((item) => normalizedAlloy(item.code) === carcassKey) : null;
@@ -464,7 +469,10 @@ export function simulateMachineLoad(
       if (!carcassKey) {
         itemConflicts.push({ id: `missing-carcass-${order.id}`, type: "missing-carcass", severity: "blocking", resourceCode: "SEM CARCAÇA", machineCode, orderId: order.id, toolCode: order.toolCode, message: `Cadastre a carcaça exigida pela ferramenta ${order.toolCode}.`, delayMinutes: 0 });
       } else if (!carcass || carcass.capacity < Math.max(order.carcassQuantity ?? 1, 1)) {
-        itemConflicts.push({ id: `carcass-capacity-${order.id}`, type: "carcass-capacity", severity: "blocking", resourceCode: carcassKey, machineCode, orderId: order.id, toolCode: order.toolCode, message: `A carcaça ${carcassKey} não possui unidade física disponível.`, delayMinutes: 0 });
+        const stockDetail = carcass
+          ? ` Ela está cadastrada no estoque físico, com ${carcass.totalQuantity ?? 0} unidade(s) no total e ${carcass.unavailableQuantity ?? carcass.totalQuantity ?? 0} fora de uso; no momento há ${carcass.capacity} livre(s), mas são necessárias ${Math.max(order.carcassQuantity ?? 1, 1)}.`
+          : " O modelo está configurado na ferramenta, mas ainda não foi cadastrado no estoque físico de carcaças.";
+        itemConflicts.push({ id: `carcass-capacity-${order.id}`, type: "carcass-capacity", severity: "blocking", resourceCode: carcassKey, machineCode, orderId: order.id, toolCode: order.toolCode, message: `A ferramenta ${order.toolCode} exige a carcaça ${carcassKey}.${stockDetail}`, delayMinutes: 0 });
       }
       if (!boKey) {
         itemConflicts.push({ id: `missing-bo-${order.id}`, type: "missing-bo", severity: "blocking", resourceCode: "SEM BO", machineCode, orderId: order.id, toolCode: order.toolCode, message: `Informe o BO exigido pela ferramenta ${order.toolCode}.`, delayMinutes: 0 });
@@ -524,7 +532,7 @@ export function simulateMachineLoad(
       total.loadedKg += loadedKg;
       total.endingBalanceKg = billetBalanceAfterKg;
       billetTotals.set(selectedAlloy, total);
-      items.push({ ...order, remainingKg, selectedAlloy, startAt: resourceReady, extrusionStartAt, endAt, theoreticalMinutes, waitingMinutes: Math.max((resourceReady.getTime() - pressAvailable.getTime()) / minute, 0), preparationMinutes, billetRequiredKg, billetBarsLoaded, billetBalanceBeforeKg, billetBalanceAfterKg, pressReadyAt, toolHeatingStartAt: allocation?.start ?? null, calculatedToolReadyAt: readyAt, latestHeatingStartAt, ovenSlotNumber: allocation?.slot ?? null, thermalWaitMinutes, resourceWaitMinutes, resourceConflicts: itemConflicts });
+      items.push({ ...order, productivityKgH, remainingKg, selectedAlloy, startAt: resourceReady, extrusionStartAt, endAt, theoreticalMinutes, waitingMinutes: Math.max((resourceReady.getTime() - pressAvailable.getTime()) / minute, 0), preparationMinutes, billetRequiredKg, billetBarsLoaded, billetBalanceBeforeKg, billetBalanceAfterKg, pressReadyAt, toolHeatingStartAt: allocation?.start ?? null, calculatedToolReadyAt: readyAt, latestHeatingStartAt, ovenSlotNumber: allocation?.slot ?? null, thermalWaitMinutes, resourceWaitMinutes, resourceConflicts: itemConflicts });
       const interval = { start: resourceReady, end: endAt, quantity: 1, orderId: order.id };
       toolReservations.set(toolKey, [...(toolReservations.get(toolKey) ?? []), interval]);
       if (carcass && carcass.capacity > 0) carcassReservations.set(carcassKey, [...(carcassReservations.get(carcassKey) ?? []), { ...interval, quantity: Math.max(order.carcassQuantity ?? 1, 1) }]);
