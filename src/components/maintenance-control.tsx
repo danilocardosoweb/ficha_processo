@@ -129,7 +129,7 @@ export function MaintenanceControl() {
 
   useEffect(() => {
     if (searchParams.get("novaParada") !== "1") return;
-    setAddOpen(true);
+    queueMicrotask(() => setAddOpen(true));
     const url = new URL(window.location.href);
     url.searchParams.delete("novaParada");
     window.history.replaceState(null, "", url);

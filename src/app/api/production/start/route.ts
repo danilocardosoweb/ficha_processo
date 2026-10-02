@@ -24,7 +24,7 @@ export async function POST(request: Request) {
   }
 
   const supabase = await createClient();
-  const { data, error } = await supabase.rpc("local_start_production", {
+  const { data, error } = await supabase.rpc("local_start_production_session", {
     p_token: token,
     p_order_ids: parsed.data.orderIds,
     p_confirmed_removed_from_oven: parsed.data.confirmedRemovedFromOven,

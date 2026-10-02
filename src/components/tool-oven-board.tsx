@@ -289,7 +289,13 @@ export function ToolOvenBoard() {
   const visibleStageCount = boardView === "map"
     ? Number(visibleStages.waiting) + Number(visibleStages.heating || visibleStages.released)
     : Object.values(visibleStages).filter(Boolean).length;
-  const boardGridClass = visibleStageCount === 1 ? "min-[1440px]:grid-cols-1" : visibleStageCount === 2 ? "min-[1440px]:grid-cols-2" : "min-[1600px]:grid-cols-3";
+  // Monitores industriais comuns podem ter uma viewport CSS menor que a resolução física.
+  // Mantemos as etapas lado a lado a partir de 1200px para evitar cartões excessivamente largos.
+  const boardGridClass = visibleStageCount === 1
+    ? "min-[1200px]:grid-cols-1"
+    : visibleStageCount === 2
+      ? "min-[1200px]:grid-cols-2"
+      : "min-[1200px]:grid-cols-2 min-[1650px]:grid-cols-3";
   function toggleStage(stage: keyof typeof visibleStages) {
     setVisibleStages((current) => {
       const next = { ...current, [stage]: !current[stage] };
@@ -585,8 +591,8 @@ function HeatingCard({ cycle, now, saving, onRelease, onCancel, onLimit, onReloc
         {expired && <p className="mt-2 rounded-lg bg-red-50 px-2 py-1.5 text-xs font-bold text-red-700">Escolha o destino: liberar sob risco ou retirar para resfriar e polir.</p>}
       </div>
       <div className="mt-2 grid grid-cols-3 gap-2">
-        <Button className="h-8 text-xs" variant="outline" size="sm" onClick={onRelocate}><ArrowRightLeft className="size-3.5" />Realocar</Button>
-        <Button className="h-8 text-xs" variant="outline" size="sm" onClick={expired ? onLimit : onCancel}><X className="size-3.5" />{expired ? "Decidir destino" : "Cancelar"}</Button>
+        <Button className="h-8 border-slate-300 bg-white text-slate-800 hover:bg-slate-100 hover:text-slate-950 disabled:border-slate-300 disabled:bg-slate-100 disabled:text-slate-700 disabled:opacity-100 text-xs" variant="outline" size="sm" onClick={onRelocate}><ArrowRightLeft className="size-3.5" />Realocar</Button>
+        <Button className="h-8 border-slate-300 bg-white text-slate-800 hover:bg-slate-100 hover:text-slate-950 disabled:border-slate-300 disabled:bg-slate-100 disabled:text-slate-700 disabled:opacity-100 text-xs" variant="outline" size="sm" onClick={expired ? onLimit : onCancel}><X className="size-3.5" />{expired ? "Decidir destino" : "Cancelar"}</Button>
         <Button className={cn("h-8 text-xs", !ready && !expired && "bg-amber-500 text-white hover:bg-amber-600")} size="sm" disabled={saving || expired} onClick={onRelease}><CheckCircle2 className="size-3.5" />{ready ? "Liberar" : expired ? "Ver decisão" : "Liberar antes"}</Button>
       </div>
     </article>
@@ -616,8 +622,8 @@ function ThermalCurve({ cycle, now, progress, ready, expired }: { cycle: Heating
   const elapsedMinutes = Math.max(0, Math.floor((now - new Date(cycle.entered_at).getTime()) / 60000));
   return <div className="mt-2 overflow-hidden rounded-lg border border-orange-100 bg-gradient-to-r from-orange-50/70 via-white to-amber-50/60 px-2.5 pb-1.5 pt-2" aria-label={`Simulação térmica: temperatura estimada ${estimatedTemperature} graus Celsius, alvo ${targetTemperature} graus Celsius`}>
     <div className="flex items-center justify-between gap-2">
-      <div className="flex min-w-0 items-center gap-1.5"><Flame className={cn("size-3.5 shrink-0", expired ? "text-red-500" : ready ? "text-emerald-500" : "text-orange-500")} /><p className="truncate text-[9px] font-black uppercase tracking-[.12em] text-slate-500">Simulação térmica</p><span className="rounded-full bg-white px-1.5 py-0.5 text-[8px] font-bold text-slate-400 ring-1 ring-slate-100">estimada</span></div>
-      <p className={cn("shrink-0 font-mono text-sm font-black", expired ? "text-red-600" : ready ? "text-emerald-600" : "text-orange-600")}><span className="text-[9px] font-bold text-slate-400">agora </span>{estimatedTemperature} °C</p>
+      <div className="flex min-w-0 items-center gap-1.5"><Flame className={cn("size-3.5 shrink-0", expired ? "text-red-500" : ready ? "text-emerald-500" : "text-orange-500")} /><p className="truncate text-[9px] font-black uppercase tracking-[.12em] text-slate-600">Simulação térmica</p><span className="rounded-full bg-white px-1.5 py-0.5 text-[8px] font-bold text-slate-600 ring-1 ring-slate-200">estimada</span></div>
+      <p className={cn("shrink-0 font-mono text-sm font-black", expired ? "text-red-600" : ready ? "text-emerald-600" : "text-orange-600")}><span className="text-[9px] font-bold text-slate-600">agora </span>{estimatedTemperature} °C</p>
     </div>
     <svg viewBox="0 0 200 57" role="img" className="mt-0.5 h-[58px] w-full" preserveAspectRatio="none">
       <defs><linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={expired ? "#ef4444" : ready ? "#10b981" : "#f97316"} stopOpacity="0.32" /><stop offset="100%" stopColor="#fff7ed" stopOpacity="0.05" /></linearGradient></defs>
@@ -630,14 +636,14 @@ function ThermalCurve({ cycle, now, progress, ready, expired }: { cycle: Heating
       <text x={chartLeft} y="56" fill="#94a3b8" fontSize="6">25 °C</text>
       <text x={chartRight} y="56" fill="#64748b" fontSize="6" textAnchor="end">alvo {targetTemperature} °C</text>
     </svg>
-    <div className="-mt-0.5 flex items-center justify-between text-[8px] font-medium text-slate-400"><span>{elapsedMinutes} min no forno</span><span>{ready || expired ? "temperatura estabilizada" : `${Math.round(progress)}% do aquecimento mínimo`}</span></div>
+    <div className="-mt-0.5 flex items-center justify-between text-[8px] font-medium text-slate-600"><span>{elapsedMinutes} min no forno</span><span>{ready || expired ? "temperatura estabilizada" : `${Math.round(progress)}% do aquecimento mínimo`}</span></div>
   </div>;
 }
 function ReleasedCard({ cycle, onRelocate }: { cycle: HeatingCycle; onRelocate: () => void }) {
   const orders = cycle.tool_heating_cycle_orders.map((link) => link.production_orders).filter((order): order is HeatingOrder => !!order && order.is_active && ["planned","released","paused"].includes(order.status)); const query = new URLSearchParams({ tool: cycle.tool_code, machine: cycle.machine_code, orders: orders.map((order) => order.id).join(",") });
   return <article className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3"><div className="flex items-center justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-2"><p className="font-mono text-lg font-black text-emerald-700">{cycle.tool_code}</p>{cycle.released_early && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-black uppercase text-amber-700">Antecipada</span>}</div><p className="truncate text-[11px] text-slate-500">P{machineLabel(cycle.machine_code)} · {orders.length} item(ns) · {cycle.actual_heating_minutes ?? "—"} min · saída {clock(cycle.released_at)} · {cycle.released_by_name || "—"}</p></div><CheckCircle2 className="size-5 shrink-0 text-emerald-600" /></div><div className="mt-2 grid grid-cols-[auto_1fr] gap-2"><Button className="h-8 text-xs" variant="outline" size="sm" onClick={onRelocate}><ArrowRightLeft className="size-3.5" />Prensa</Button><Button className="h-8 text-xs" size="sm" render={<Link href={`/producao?${query.toString()}`} />}><Play className="size-3.5" />Abrir ficha</Button></div>{cycle.released_early && cycle.release_notes && <p className="mt-2 truncate rounded-lg bg-amber-50 px-2 py-1 text-[10px] text-amber-800" title={cycle.release_notes}>{cycle.release_notes}</p>}</article>;
 }
-function Time({ label, value }: { label: string; value: string }) { return <div><p className="text-slate-400">{label}</p><p className="mt-0.5 text-xs font-bold text-slate-800">{value}</p></div>; }
+function Time({ label, value }: { label: string; value: string }) { return <div><p className="font-medium text-slate-600">{label}</p><p className="mt-0.5 text-xs font-bold text-slate-900">{value}</p></div>; }
 function Pager({ page, pages, onChange }: { page: number; pages: number; onChange: (page: number) => void }) {
   if (pages <= 1) return null;
   return <nav className="flex items-center justify-between border-t pt-2" aria-label="Paginação"><span className="text-[10px] text-slate-500">Página {page} de {pages}</span><div className="flex gap-1"><button type="button" aria-label="Página anterior" disabled={page <= 1} onClick={() => onChange(page - 1)} className="grid size-7 place-items-center rounded-lg border bg-white disabled:opacity-35"><ChevronLeft className="size-4" /></button><button type="button" aria-label="Próxima página" disabled={page >= pages} onClick={() => onChange(page + 1)} className="grid size-7 place-items-center rounded-lg border bg-white disabled:opacity-35"><ChevronRight className="size-4" /></button></div></nav>;

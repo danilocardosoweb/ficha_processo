@@ -13,7 +13,9 @@ import { fetchFreeModels } from "@/modules/planning/agents/catalog";
 import { createAgentJournal } from "@/modules/planning/agents/journal";
 
 export const runtime="nodejs";
-export const maxDuration=360;
+// Vercel Hobby allows no more than 300 seconds for a Serverless Function.
+// Keeping this within the platform limit is required for production deploys.
+export const maxDuration=300;
 // Local-process guard for the initial, manually requested round. No background jobs.
 const gates=new Map<string,{active:boolean;count:number;until:number}>();
 export async function POST(request:Request) {

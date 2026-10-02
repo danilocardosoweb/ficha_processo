@@ -1135,17 +1135,14 @@ export function ProductionCockpit() {
     setSavingStatus(true);
     setMessage("");
     try {
-      const { data, error } = await createClient()
-        .from("production_orders")
-        .update({
-          status: "in_progress",
-          last_status_reason: `Produção retomada por ${operatorName}`,
-        })
-        .in("id", chosen.map((order) => order.id))
-        .eq("is_active", true)
-        .eq("status", "paused")
-        .select(orderFields);
-      if (error) throw error;
+      const response = await fetch("/api/production/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderIds: chosen.map((order) => order.id) }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as { error?: string; orders?: Order[] };
+      if (!response.ok) throw new Error(payload.error || "Não foi possível retomar a produção.");
+      const data = payload.orders;
       if (!data || data.length !== chosen.length) throw new Error("Um dos itens não está mais pausado. Atualize a busca antes de continuar.");
       const updated = data as Order[];
       setOrders((current) => current.map((order) => updated.find((item) => item.id === order.id) ?? order));
@@ -1203,75 +1200,21 @@ export function ProductionCockpit() {
         requestOfflineSync(["production_orders", "process_sheets"]);
         return;
       }
-      const supabase = createClient();
-      const totalTargetKg = chosen.reduce(
-        (sum, order) => sum + Math.max(0, numeric(order.target_kg) - numeric(order.produced_kg)),
-        0,
-      );
-      const totalTargetPieces = chosen.reduce(
-        (sum, order) => sum + Math.max(0, numeric(order.target_quantity) - numeric(order.produced_quantity)),
-        0,
-      );
-      if (totalTargetKg > 0 && producedKg + 0.001 < totalTargetKg)
-        throw new Error("O peso informado é menor que o saldo da ordem. Registre como produção parcial para preservar o restante na programação.");
-      if (totalTargetPieces > 0 && producedQuantity < totalTargetPieces)
-        throw new Error("A quantidade informada é menor que o saldo da ordem. Registre como produção parcial para preservar o restante na programação.");
-      let allocatedKg = 0;
-      let allocatedPieces = 0;
-      const completed: Order[] = [];
-      for (const [index, order] of chosen.entries()) {
-        const last = index === chosen.length - 1;
-        const orderKg = last
-          ? producedKg - allocatedKg
-          : totalTargetKg > 0
-            ? Number(
-                (
-                  (producedKg * Math.max(0, numeric(order.target_kg) - numeric(order.produced_kg))) /
-                  totalTargetKg
-                ).toFixed(3),
-              )
-            : 0;
-        const orderPieces = last
-          ? producedQuantity - allocatedPieces
-          : totalTargetPieces > 0
-            ? Math.round(
-                  (producedQuantity * Math.max(0, numeric(order.target_quantity) - numeric(order.produced_quantity))) /
-                  totalTargetPieces,
-              )
-            : 0;
-        allocatedKg += orderKg;
-        allocatedPieces += orderPieces;
-        const { data, error } = await supabase
-          .from("production_orders")
-          .update({
-            status: "completed",
-            produced_kg: Math.max(0, Number((numeric(order.produced_kg) + orderKg).toFixed(3))),
-            produced_quantity: Math.max(0, Math.round(numeric(order.produced_quantity) + orderPieces)),
-            completed_by_name: operatorName,
-            actual_end: new Date().toISOString(),
-            process_sheet_id: selected?.id ?? null,
-            achieved_productivity_kg_h: achievedProductivity,
-            last_status_reason: [
-              `Produção concluída por ${operatorName}`,
-              chosen.length > 1
-                ? `Campanha conjunta com ${chosen.length} itens; resultado distribuído proporcionalmente à demanda`
-                : "",
-              notes.trim(),
-            ]
-              .filter(Boolean)
-              .join(" · "),
-          })
-          .eq("id", order.id)
-          .eq("status", "in_progress")
-          .select(orderFields)
-          .maybeSingle();
-        if (error) throw error;
-        if (!data)
-          throw new Error(
-            `A ordem ${order.order_number} não está em produção ou já foi concluída.`,
-          );
-        completed.push(data as Order);
-      }
+      const response = await fetch("/api/production/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderIds: chosen.map((order) => order.id),
+          producedKg,
+          producedQuantity,
+          achievedProductivity,
+          processSheetId: selected?.id ?? undefined,
+          notes: notes.trim() || undefined,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as { error?: string; orders?: Order[] };
+      if (!response.ok || !payload.orders?.length) throw new Error(payload.error || "Não foi possível concluir a produção.");
+      const completed = payload.orders;
       const completedIds = new Set(completed.map((order) => order.id));
       setOrders((current) =>
         current.filter((order) => !completedIds.has(order.id)),
@@ -1330,76 +1273,44 @@ export function ProductionCockpit() {
       setMessage("Inicie a campanha antes de apontar uma parada.");
       return;
     }
-    const order = chosen[0];
     setSavingStatus(true);
     setMessage("");
     try {
-      const supabase = createClient();
-      const { error } = await supabase.from("machine_stoppages").insert({
-        organization_id: organizationId,
-        production_order_id: order.id,
-        import_batch_id: order.import_batch_id,
-        machine_code: order.machine_code,
-        plan_code: order.plan_code,
-        order_number: order.order_number,
-        tool_code: order.tool_code,
-        product_code: order.product_code,
-        customer_name: order.customer_name,
-        alloy_code: order.alloy_code,
-        temper: order.temper,
-        category: input.category,
-        reason_code: input.reasonCode,
-        reason_catalog_id: input.reasonCatalogId,
-        stoppage_type_catalog_id: input.typeCatalogId,
-        responsible_department: input.responsibleDepartment,
-        reason: input.reason.trim(),
-        notes:
-          [
-            chosen.length > 1
-              ? `Campanha: ${chosen.map((item) => item.order_number).join(", ")}`
-              : "",
-            input.notes.trim(),
-          ]
-            .filter(Boolean)
-            .join(" · ") || null,
-        shift: input.shift || null,
-        maintenance_required: input.maintenanceRequired,
-        reported_by_name: operatorName,
-        problem_area: input.problemArea,
-        responsible_area: input.responsibleArea,
-        service_order_number: input.serviceOrderNumber || null,
-        occurrence_date: input.occurrenceDate,
-        started_at: input.startedAt,
-        ended_at: input.endedAt || null,
-        duration_minutes: input.durationMinutes,
-        status: input.endedAt ? "closed" : "open",
-        closed_by_name: input.endedAt ? operatorName : null,
-        tool_sequence: input.toolSequence,
-        billet_casing: input.billetCasing || null,
-        equipment_type: input.equipmentType || null,
-        equipment_number: input.equipmentNumber || null,
-        symptoms: input.symptoms.trim(),
-        intervention_performed: input.interventionPerformed.trim() || null,
-        dummy_block_entered: input.dummyBlockEntered || null,
-        dummy_block_exited: input.dummyBlockExited || null,
-        press_count: input.pressCount,
-        dummy_block_side: input.dummyBlockSide || null,
+      const response = await fetch("/api/production/stoppage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderIds: chosen.map((item) => item.id),
+          category: input.category,
+          reasonCode: input.reasonCode,
+          reasonCatalogId: input.reasonCatalogId,
+          typeCatalogId: input.typeCatalogId,
+          responsibleDepartment: input.responsibleDepartment,
+          reason: input.reason.trim(),
+          notes: [chosen.length > 1 ? `Campanha: ${chosen.map((item) => item.order_number).join(", ")}` : "", input.notes.trim()].filter(Boolean).join(" · ") || null,
+          shift: input.shift || null,
+          maintenanceRequired: input.maintenanceRequired,
+          problemArea: input.problemArea,
+          responsibleArea: input.responsibleArea,
+          serviceOrderNumber: input.serviceOrderNumber || null,
+          occurrenceDate: input.occurrenceDate,
+          startedAt: input.startedAt,
+          endedAt: input.endedAt || null,
+          durationMinutes: input.durationMinutes,
+          toolSequence: input.toolSequence,
+          billetCasing: input.billetCasing || null,
+          equipmentType: input.equipmentType || null,
+          equipmentNumber: input.equipmentNumber || null,
+          symptoms: input.symptoms.trim(),
+          interventionPerformed: input.interventionPerformed.trim() || null,
+          dummyBlockEntered: input.dummyBlockEntered || null,
+          dummyBlockExited: input.dummyBlockExited || null,
+          pressCount: input.pressCount,
+          dummyBlockSide: input.dummyBlockSide || null,
+        }),
       });
-      if (error) throw error;
-      if (!input.endedAt && chosen.length > 1) {
-        const { error: pauseError } = await supabase
-          .from("production_orders")
-          .update({
-            status: "paused",
-            last_status_reason: `Campanha pausada por ${operatorName}: ${input.reason.trim()}`,
-          })
-          .in(
-            "id",
-            chosen.slice(1).map((item) => item.id),
-          )
-          .eq("status", "in_progress");
-        if (pauseError) throw pauseError;
-      }
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Não foi possível registrar a parada.");
       if (!input.endedAt) {
         const selectedIds = new Set(chosen.map((item) => item.id));
         setOrders((current) =>
@@ -1428,24 +1339,14 @@ export function ProductionCockpit() {
     setSavingStatus(true);
     setMessage("");
     try {
-      const supabase = createClient();
-      const { data, error } = await supabase
-        .from("production_orders")
-        .update({
-          status: "planned",
-          is_active: true,
-          reopened_at: new Date().toISOString(),
-          reopened_by_name: operatorName,
-          reprogram_count: order.reprogram_count + 1,
-          last_status_reason: `Item reprogramado por ${operatorName}`,
-        })
-        .eq("id", order.id)
-        .eq("status", "completed")
-        .select(orderFields)
-        .maybeSingle();
-      if (error) throw error;
-      if (!data)
-        throw new Error("O item já foi reprogramado por outro operador.");
+      const response = await fetch("/api/production/reopen", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId: order.id }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as { error?: string; order?: Order };
+      if (!response.ok || !payload.order) throw new Error(payload.error || "Não foi possível reprogramar o item.");
+      const data = payload.order;
       setCompletedOrders((current) =>
         current.filter((item) => item.id !== order.id),
       );

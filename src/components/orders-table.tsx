@@ -137,30 +137,33 @@ export function OrdersTable({ queues }: { queues: SimplifiedQueue[] }) {
     setSaving(true);
     setActionError("");
     try {
-      const supabase = createClient();
       if (action.kind === "complete_item") {
-        const { error } = await supabase.from("production_orders").update({
-          status: "completed",
-          is_active: false,
-          completed_by_name: actor,
-          produced_kg: Number(producedKg.replace(",", ".")) || 0,
-          produced_quantity: Number(producedQuantity.replace(",", ".")) || 0,
-          last_status_reason: `Produção confirmada manualmente por ${actor}`,
-        }).eq("id", action.order.id);
-        if (error) throw error;
+        const response = await fetch("/api/production/manual-result", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            orderId: action.order.id,
+            producedKg: Number(producedKg.replace(",", ".")) || 0,
+            producedQuantity: Number(producedQuantity.replace(",", ".")) || 0,
+          }),
+        });
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        if (!response.ok) throw new Error(payload.error || "Não foi possível registrar o resultado.");
       } else if (action.kind === "stop_item") {
         if (reason.trim().length < 3) throw new Error("Informe por que o item foi encerrado sem produção.");
-        const { error } = await supabase.from("production_orders").update({
-          status: "cancelled",
-          is_active: false,
-          completed_by_name: actor,
-          last_status_reason: `Item encerrado sem produção por ${actor}: ${reason.trim()}`,
-        }).eq("id", action.order.id);
-        if (error) throw error;
+        const response = await fetch("/api/production/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ orderId: action.order.id, reason: reason.trim() }),
+        });
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        if (!response.ok) throw new Error(payload.error || "Não foi possível encerrar o item.");
       } else if (action.kind === "finish_plan") {
+        const supabase = createClient();
         const { error } = await supabase.rpc("finish_simplified_plan", { p_import_id: action.queue.id, p_actor: actor, p_reason: reason.trim() || "Plano finalizado manualmente" });
         if (error) throw error;
       } else {
+        const supabase = createClient();
         if (confirmText.trim().toUpperCase() !== String(action.queue.plan_code ?? "").trim().toUpperCase()) throw new Error("Digite exatamente o número do Plano para confirmar.");
         if (reason.trim().length < 5) throw new Error("Informe o motivo da exclusão.");
         const { error } = await supabase.rpc("archive_simplified_plan", { p_import_id: action.queue.id, p_actor: actor, p_reason: reason.trim() });
