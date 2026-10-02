@@ -1,0 +1,19 @@
+"use client";
+import { useRef, useState, type ReactNode } from "react";
+import { Button } from "@/components/ui/button";
+const defaults=[{x:2,y:3,w:28,h:39},{x:32,y:3,w:28,h:39},{x:2,y:48,w:28,h:43},{x:32,y:48,w:28,h:43},{x:62,y:3,w:36,h:31},{x:62,y:40,w:36,h:54}];
+export function AgentWorkspaceCanvas({panes}:{panes:Array<{title:string;status:string;content:ReactNode;active?:boolean;onSelect?:()=>void}>}){
+  const [positions,setPositions]=useState(defaults);const canvas=useRef<HTMLDivElement>(null);
+  const dragging=useRef<{index:number;x:number;y:number;left:number;top:number}|null>(null);
+  function move(index:number,x:number,y:number){setPositions(old=>old.map((p,i)=>i===index?{...p,x:Math.max(0,Math.min(100-p.w,x)),y:Math.max(0,Math.min(100-p.h,y))}:p));}
+  return <section className="space-y-2"><div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600"><span>Arraste o título para organizar. Pelo teclado: setas no título. Selecione um agente para abrir seu parecer.</span><Button variant="outline" size="sm" onClick={()=>setPositions(defaults)}>Organizar painéis</Button></div>
+    <div ref={canvas} className="operational-canvas relative rounded-2xl border border-slate-700 bg-slate-950" style={{height:660,backgroundImage:"radial-gradient(#334155 1px, transparent 1px)",backgroundSize:"20px 20px"}}>
+      <style>{`.operational-canvas .operational-pane{position:absolute}.operational-canvas .operational-connections{display:block}@media(max-width:900px){.operational-canvas{height:auto!important;display:grid;gap:12px;padding:12px}.operational-canvas .operational-pane{position:relative!important;left:auto!important;top:auto!important;width:100%!important;height:auto!important;min-height:180px}.operational-canvas .operational-connections{display:none}}`}</style>
+      <svg className="operational-connections pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">{[[0,1],[1,2],[2,3],[3,4],[4,5]].map(([a,b])=>{const p=positions[a],q=positions[b];return <path key={a} d={`M ${p.x+p.w/2} ${p.y+p.h/2} C ${p.x+p.w/2+10} ${p.y+p.h/2}, ${q.x+q.w/2-10} ${q.y+q.h/2}, ${q.x+q.w/2} ${q.y+q.h/2}`} fill="none" stroke="#38bdf8" strokeWidth=".2"/>;})}</svg>
+      {panes.map((pane,index)=>{const p=positions[index];return <article key={pane.title} className={`operational-pane flex flex-col overflow-hidden rounded-xl border bg-white shadow-lg ${pane.active?"border-violet-400 ring-2 ring-violet-400":"border-slate-500"}`} style={{left:p.x+"%",top:p.y+"%",width:p.w+"%",height:p.h+"%"}}>
+        <button type="button" className="flex w-full touch-none items-center justify-between gap-2 bg-slate-800 px-3 py-2 text-left text-sm font-semibold text-white focus-visible:outline-2 focus-visible:outline-sky-300" aria-label={`Mover painel ${pane.title}; use as setas`} onKeyDown={e=>{const delta:{[key:string]:number[]}={ArrowLeft:[-2,0],ArrowRight:[2,0],ArrowUp:[0,-2],ArrowDown:[0,2]};if(delta[e.key]){e.preventDefault();move(index,p.x+delta[e.key][0],p.y+delta[e.key][1]);}}} onPointerDown={e=>{dragging.current={index,x:e.clientX,y:e.clientY,left:p.x,top:p.y};e.currentTarget.setPointerCapture(e.pointerId);}} onPointerMove={e=>{const d=dragging.current,r=canvas.current?.getBoundingClientRect();if(d&&d.index===index&&r)move(index,d.left+(e.clientX-d.x)/r.width*100,d.top+(e.clientY-d.y)/r.height*100);}} onPointerUp={()=>{dragging.current=null;}} onPointerCancel={()=>{dragging.current=null;}}><span>{pane.title}</span><span aria-hidden="true">⠿</span></button>
+        <div className="flex-1 space-y-2 overflow-auto p-3"><p className="text-xs font-semibold text-slate-500">{pane.status}</p>{pane.content}{pane.onSelect&&<Button variant="outline" size="sm" onClick={pane.onSelect}>Ver parecer e propostas</Button>}</div>
+      </article>;})}
+    </div>
+  </section>;
+}

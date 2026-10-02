@@ -34,8 +34,22 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
+import { DecisionWorkspace } from "@/components/decision-workspace";
+import { PlanningEnginePremises } from "@/components/planning-engine-premises";
+import { decisionPresets, type DecisionProfile } from "@/modules/planning/decision-system/schema";
+import { evaluateDecision } from "@/modules/planning/decision-system/engine";
+import { evaluateShiftGoals } from "@/modules/planning/decision-system/shift-goals";
+import type { ShiftGoalsReport } from "@/modules/planning/decision-system/shift-goals";
+import { pressPlansForSimulation, type DecisionContext, type DecisionCandidate } from "@/modules/planning/decision-system/optimizer";
+import { selectPhysicalTool } from "@/modules/planning/tool-selection";
+import {
+  DEFAULT_PRODUCTIVITY_KG_H,
+  guardProductivityKgH,
+  normalizeProductivityKgH,
+} from "@/modules/planning/productivity";
 import {
   simulateMachineLoad,
   type LoadOrderInput,
@@ -43,6 +57,7 @@ import {
   type ProductivitySource,
   type ResourceUnavailabilityInput,
   type WorkShiftInput,
+  type OvertimePeriodInput,
 } from "@/modules/planning/machine-load-simulator";
 import { SIMULATION_MODEL_VERSION } from "@/modules/planning/simulation";
 import {
@@ -51,7 +66,18 @@ import {
   type IntelligenceWeights,
   type PlanningAnalysis,
 } from "@/modules/planning/planning-intelligence";
+import {
+  deterministicValidation,
+  packetProvenance,
+} from "@/modules/planning/ai/contracts";
+import { unresolvedPlanningAssumptions } from "@/modules/planning/source-of-truth";
 import { useCurrentUser } from "@/components/current-user-provider";
+import { FieldHelp, LoadHelpGuide } from "@/components/load-help";
+import type { LoadHelpKey } from "@/modules/planning/load-help";
+import {
+  machineLoadSectionKeys,
+  useMachineLoadSectionVisibility,
+} from "@/lib/machine-load-visibility";
 
 interface RawOrder {
   id: string;
@@ -97,6 +123,7 @@ interface RawSetting {
   default_productivity_kg_h: number | string;
   setup_minutes: number;
   alloy_change_minutes: number;
+  tool_change_minutes?: number | null;
   tool_heating_minutes: number;
   oven_count: number;
   oven_slots_per_oven: number;
@@ -111,16 +138,29 @@ interface RawShift {
   machine_codes: string[];
   is_active: boolean;
 }
+interface RawOvertimePeriod {
+  id: string;
+  work_date: string;
+  start_time: string;
+  end_time: string;
+  machine_codes: string[];
+  reason: string;
+  is_active: boolean;
+}
 interface ProductionSettingsPayload {
   settings: RawSetting[];
   shifts: RawShift[];
+  overtime_periods?: RawOvertimePeriod[];
 }
 interface RawCycleOrder {
   production_order_id: string;
   tool_heating_cycles: {
     status: string;
+    entered_at: string;
     expected_ready_at: string | null;
     released_at: string | null;
+    oven_position: number | null;
+    tool_ovens: { code: string; name: string; machine_code: string } | null;
   } | null;
 }
 interface RawAlloy {
@@ -202,6 +242,11 @@ interface ScenarioSummary {
   updatedAt: string;
   createdBy: string | null;
 }
+
+function simulationDisplayId(scenarioId: string) {
+  const compactId = scenarioId.replace(/-/g, "").slice(0, 10).toUpperCase();
+  return `SIM-${compactId}`;
+}
 interface LoadedScenario {
   scenarioId: string;
   name: string;
@@ -210,7 +255,7 @@ interface LoadedScenario {
   versionNumber: number;
   mode: "fifo" | "optimized" | "manual";
   requestedStartAt: string;
-  inputs?: { selectedMachine?: string };
+  inputs?: { selectedMachine?: string; sequenceChanges?: NonNullable<DecisionCandidate["sequenceChange"]>[] };
   rules?: {
     unavailability?: ResourceUnavailabilityInput[];
     billetStock?: { capturedAt?: string; summary?: BilletStockSummary[] };
@@ -294,6 +339,28 @@ interface AiPlanningAnalysis {
       orderedOrderIds: string[];
     }>;
   };
+  contract?: {
+    schemaVersion: number;
+    role: string;
+    provenance: { specVersion: string; engineVersion: string; snapshotId: string };
+  };
+  warnings?: string[];
+  resourceConflicts?: string[];
+  planningChanges?: Array<{
+    action: "REORDER";
+    machineCode: string;
+    orderId: string;
+    fromPosition: number;
+    toPosition: number;
+    reason: string;
+    expectedImpact: Record<string, string | number>;
+  }>;
+  validation?: {
+    status: "feasible" | "blocked" | "incomplete" | "not_evaluated";
+    hardViolations: number;
+    unknowns: number;
+    reason: string;
+  };
 }
 interface AiAnalysisEnvelope {
   result: AiPlanningAnalysis;
@@ -311,37 +378,76 @@ interface OpenRouterModelOption {
   pricing: { prompt?: string; completion?: string } | null;
 }
 
-type MachineLoadSectionKey =
-  "intelligence" | "copilot" | "learning" | "thermal" | "alerts" | "simulation";
-
-const machineLoadSectionKeys: MachineLoadSectionKey[] = [
-  "intelligence",
-  "copilot",
-  "learning",
-  "thermal",
-  "alerts",
-  "simulation",
-];
+const providerModelOptions: Record<
+  IntelligenceWeights["aiProvider"],
+  Array<{ id: string; name: string }>
+> = {
+  openai: [
+    { id: "gpt-4.1-mini", name: "GPT-4.1 mini · rápido e econômico" },
+    { id: "gpt-4.1", name: "GPT-4.1 · maior capacidade de análise" },
+    { id: "gpt-5-mini", name: "GPT-5 mini · raciocínio mais forte" },
+    { id: "gpt-4o-mini", name: "GPT-4o mini · alternativa econômica" },
+  ],
+  lmstudio: [],
+  openclaw: [],
+  openrouter: [],
+};
 
 const defaultSettings: MachineLoadSettings = {
   billetBarWeightKg: 415,
   extrusionEfficiency: 0.85,
-  defaultProductivityKgH: 1000,
+  defaultProductivityKgH: DEFAULT_PRODUCTIVITY_KG_H,
   setupMinutes: 20,
   alloyChangeMinutes: 15,
+  toolChangeMinutes: 1,
   toolHeatingMinutes: 240,
   ovenCount: 3,
   ovenSlotsPerOven: 7,
   ovenSlots: 21,
 };
-const numberValue = (value: unknown) =>
-  typeof value === "number"
-    ? value
-    : Number(
-        String(value ?? "")
-          .replace(/\./g, "")
-          .replace(",", "."),
-      ) || 0;
+const numberValue = (value: unknown) => {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  const raw = String(value ?? "").trim();
+  if (!raw) return 0;
+  const cleaned = raw.replace(/[^0-9,.-]/g, "");
+  if (!cleaned || /^[-.,]+$/.test(cleaned)) return 0;
+  const negative = cleaned.startsWith("-");
+  const unsigned = cleaned.replace(/-/g, "");
+  const comma = unsigned.lastIndexOf(",");
+  const dot = unsigned.lastIndexOf(".");
+  let normalized = unsigned;
+
+  if (comma >= 0 && dot >= 0) {
+    // The last separator is the decimal separator: 1.234,56 or 1,234.56.
+    normalized = comma > dot
+      ? `${unsigned.replace(/\./g, "").replace(",", ".")}`
+      : unsigned.replace(/,/g, "");
+  } else if (comma >= 0) {
+    const fraction = unsigned.slice(comma + 1);
+    normalized = fraction.length <= 2
+      ? unsigned.replace(",", ".")
+      : unsigned.replace(/,/g, "");
+  } else if (dot >= 0) {
+    const parts = unsigned.split(".");
+    if (parts.length > 2) {
+      const last = parts.at(-1) ?? "";
+      const thousands = parts.slice(1).every((part) => part.length === 3);
+      normalized = thousands
+        ? parts.join("")
+        : `${parts.slice(0, -1).join("")}.${last}`;
+    } else {
+      const [whole = "", fraction = ""] = parts;
+      // Preserve Brazilian thousand notation such as 1.300 while keeping
+      // decimal database values such as 0.85 and 405.0 intact.
+      normalized = fraction.length === 3 && whole.length > 0 && whole.length <= 3 && whole !== "0"
+        ? `${whole}${fraction}`
+        : unsigned;
+    }
+  }
+
+  const parsed = Number(`${negative ? "-" : ""}${normalized}`);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
 const textValue = (...values: unknown[]) =>
   values
     .map((value) =>
@@ -400,12 +506,12 @@ function hydrateSimulation(value: unknown) {
 
 function readSheetProductivity(parameters: Record<string, unknown> | null) {
   if (!parameters) return 0;
-  return numberValue(
+  return normalizeProductivityKgH(
     parameters.target_productivity_kg_h ??
       parameters.productivity_kg_h ??
       parameters.produtividade_kg_h ??
       parameters.produtividade,
-  );
+  ) ?? 0;
 }
 
 function nestedRecord(parameters: Record<string, unknown> | null, key: string) {
@@ -423,10 +529,33 @@ function aiDecisionPacket(
   stock: BilletStockSummary[],
   carcasses: CarcassResource[],
   bos: BoResource[],
+  decisionSystem?: Record<string, unknown>,
 ) {
+  const rawEvaluation = decisionSystem?.evaluation as
+    | { hardViolations?: number; missingData?: string[] }
+    | undefined;
+  const validation = deterministicValidation({
+    hardViolations: rawEvaluation?.hardViolations,
+    missingData: rawEvaluation?.missingData,
+  });
+  const sourcePending = unresolvedPlanningAssumptions();
+  const provenance = packetProvenance(
+    {
+      mode,
+      generatedAt: generatedAt.toISOString(),
+      machines: simulation.machines.map((machine) => machine.machineCode),
+      orders: simulation.machines.flatMap((machine) => machine.items.map((item) => item.id)),
+      score: analysis.score.overall,
+    },
+    SIMULATION_MODEL_VERSION,
+  );
   return {
+    schemaVersion: 4,
     generatedAt: generatedAt.toISOString(),
+    role: "planning" as const,
     mode,
+    provenance,
+    decisionSystem,
     score: {
       overall: analysis.score.overall,
       label: analysis.score.label,
@@ -457,6 +586,7 @@ function aiDecisionPacket(
         carcassDiameterMm: item.carcassDiameterMm ?? null,
         startsAt: item.startAt.toISOString(),
         endsAt: item.endAt.toISOString(),
+        dueDate: item.dueDate ?? null,
         thermalWaitMinutes: Math.round(item.thermalWaitMinutes),
         resourceWaitMinutes: Math.round(item.resourceWaitMinutes),
         conflicts: item.resourceConflicts.map((conflict) => conflict.message),
@@ -479,7 +609,7 @@ function aiDecisionPacket(
         available: item.availableQuantity,
         status: item.status,
       })),
-      ovenDesign: "3 fornos × 7 vagas por prensa",
+      ovenDesign: simulation.machines.map(machine => ({ machine: machine.machineCode, slots: machine.thermalCoverage.ovenSlots })),
       conflicts: simulation.conflicts.map((item) => ({
         type: item.type,
         resource: item.resourceCode,
@@ -488,6 +618,29 @@ function aiDecisionPacket(
         delayMinutes: Math.round(item.delayMinutes),
         severity: item.severity,
       })),
+    },
+    deterministic: {
+      facts: [
+        ...analysis.score.criteria.map((criterion) => ({
+          id: `criterion:${criterion.key}`,
+          label: criterion.explanation,
+          kind: "calculation" as const,
+        })),
+        ...simulation.machines.map((machine) => ({
+          id: `coverage:${machine.machineCode}`,
+          label: `Prensa ${machine.machineCode}: ${Math.round(machine.thermalCoverage.predictedIdleMinutes)} min de espera térmica previstos.`,
+          kind: "calculation" as const,
+        })),
+      ],
+      risks: simulation.conflicts.map((conflict) => ({
+        type: conflict.type,
+        message: conflict.message,
+        severity: conflict.severity,
+        machineCode: conflict.machineCode,
+        orderId: conflict.orderId,
+      })),
+      missingData: [...new Set([...(rawEvaluation?.missingData ?? []), ...sourcePending])],
+      validation,
     },
     deterministicRecommendations: analysis.recommendations.map((item) => ({
       priority: item.priority,
@@ -506,7 +659,9 @@ function aiDecisionPacket(
 }
 
 export function MachineLoadSimulator() {
-  const { role, machine_codes: userMachineCodes } = useCurrentUser();
+  const { role, user_id: userId, machine_codes: userMachineCodes } = useCurrentUser();
+  const { visibility: sectionVisibility } =
+    useMachineLoadSectionVisibility(userId);
   const canPlan = role === "admin" || role === "pcp";
   const allowedMachines = useMemo(
     () =>
@@ -514,10 +669,12 @@ export function MachineLoadSimulator() {
     [canPlan, userMachineCodes],
   );
   const [orders, setOrders] = useState<LoadOrderInput[]>([]);
+  const [decisionProfile, setDecisionProfile] = useState<DecisionProfile>(() => structuredClone(decisionPresets[0]));
   const [settings, setSettings] = useState<Record<string, MachineLoadSettings>>(
     {},
   );
   const [shifts, setShifts] = useState<WorkShiftInput[]>([]);
+  const [overtimePeriods, setOvertimePeriods] = useState<OvertimePeriodInput[]>([]);
   const [billetStock, setBilletStock] = useState<BilletStockSummary[]>([]);
   const [billetStockAvailable, setBilletStockAvailable] = useState(false);
   const [carcassResources, setCarcassResources] = useState<CarcassResource[]>(
@@ -536,10 +693,11 @@ export function MachineLoadSimulator() {
     "optimized",
   );
   const [manualOrder, setManualOrder] = useState<Record<string, string[]>>({});
+  const [sequenceChanges, setSequenceChanges] = useState<NonNullable<DecisionCandidate["sequenceChange"]>[]>([]);
   const [machine, setMachine] = useState("all");
-  const [tab, setTab] = useState<"timeline" | "gantt" | "billets">("gantt");
+  const [tab, setTab] = useState<"timeline" | "gantt" | "billets">("timeline");
   const [expandedSections, setExpandedSections] = useState<
-    Record<MachineLoadSectionKey, boolean>
+    Record<(typeof machineLoadSectionKeys)[number], boolean>
   >({
     intelligence: false,
     copilot: false,
@@ -617,19 +775,25 @@ export function MachineLoadSimulator() {
           .select("tool_code,machine_code,parameters")
           .eq("organization_id", organizationId)
           .eq("is_active", true),
-        supabase
-          .from("tools")
-          .select(
-            "code,matrix_code,productivity_kg_h,holes,bo,sequence_number,source_available,package_measure_mm,carcass_diameter_mm,carcass_code",
-          )
-          .eq("organization_id", organizationId)
-          .order("matrix_code")
-          .order("source_available", { ascending: false })
-          .order("sequence_number"),
+        (async () => {
+          const allTools: RawTool[] = [];
+          const pageSize = 500;
+          for (let offset = 0; ; offset += pageSize) {
+            const page = await supabase.from("tools")
+              .select("code,matrix_code,productivity_kg_h,holes,bo,sequence_number,source_available,package_measure_mm,carcass_diameter_mm,carcass_code")
+              .eq("organization_id", organizationId)
+              .order("id")
+              .range(offset, offset + pageSize - 1);
+            if (page.error) throw page.error;
+            allTools.push(...(page.data ?? []) as RawTool[]);
+            if ((page.data?.length ?? 0) < pageSize) break;
+          }
+          return { data: allTools, error: null };
+        })(),
         supabase
           .from("tool_heating_cycle_orders")
           .select(
-            "production_order_id,tool_heating_cycles!inner(status,expected_ready_at,released_at,organization_id)",
+            "production_order_id,tool_heating_cycles!inner(status,entered_at,expected_ready_at,released_at,oven_position,organization_id,tool_ovens(code,name,machine_code))",
           )
           .eq("tool_heating_cycles.organization_id", organizationId)
           .in("tool_heating_cycles.status", ["heating", "released"]),
@@ -697,6 +861,10 @@ export function MachineLoadSimulator() {
       if (intelligenceResponse.ok && intelligencePayload?.settings)
         setIntelligence({
           ...intelligencePayload,
+          settings: {
+            ...defaultIntelligenceWeights,
+            ...intelligencePayload.settings,
+          },
           groups: learningGroups,
           recent: Array.isArray(intelligencePayload.recent)
             ? intelligencePayload.recent
@@ -735,11 +903,12 @@ export function MachineLoadSimulator() {
           ? {
               billetBarWeightKg: numberValue(row.billet_bar_weight_kg),
               extrusionEfficiency: numberValue(row.extrusion_efficiency),
-              defaultProductivityKgH: numberValue(
-                row.default_productivity_kg_h,
-              ),
+              defaultProductivityKgH:
+                normalizeProductivityKgH(row.default_productivity_kg_h) ??
+                DEFAULT_PRODUCTIVITY_KG_H,
               setupMinutes: row.setup_minutes,
               alloyChangeMinutes: row.alloy_change_minutes,
+              toolChangeMinutes: row.tool_change_minutes == null ? 1 : Math.max(numberValue(row.tool_change_minutes), 0),
               toolHeatingMinutes: row.tool_heating_minutes,
               ovenCount: Math.max(numberValue(row.oven_count) || 3, 1),
               ovenSlotsPerOven: Math.max(
@@ -753,54 +922,53 @@ export function MachineLoadSimulator() {
           : { ...defaultSettings };
       }
       const input = rawOrders.map((order) => {
+        const sourceData = order.source_data ?? {};
+        const requestedToolSequence =
+          Math.round(
+            numberValue(
+              sourceData.sequencia ??
+                sourceData.sequenceNumber ??
+                sourceData.toolSequence,
+            ),
+          ) || null;
         const sheet = rawSheets.find(
           (item) =>
             item.tool_code.toUpperCase() === order.tool_code.toUpperCase() &&
             (!item.machine_code || item.machine_code === order.machine_code),
         );
-        const tool = rawTools.find((item) =>
-          [item.code, item.matrix_code]
-            .filter(Boolean)
-            .some(
-              (code) => code!.toUpperCase() === order.tool_code.toUpperCase(),
-            ),
-        );
+        const tool = selectPhysicalTool(rawTools, order.tool_code, requestedToolSequence);
         const sheetExtrusion = nestedRecord(
           sheet?.parameters ?? null,
           "extrusion",
         );
         const sheetBillet = nestedRecord(sheet?.parameters ?? null, "billet");
-        const sourceData = order.source_data ?? {};
         const learned = learningGroups
           .filter(
             (item) =>
               item.calibrated &&
               item.tool_code.toUpperCase() === order.tool_code.toUpperCase() &&
               item.machine_code === order.machine_code &&
-              (!item.tool_sequence || item.tool_sequence === order.sequence),
+              (!item.tool_sequence || item.tool_sequence === requestedToolSequence),
           )
           .sort(
             (left, right) =>
-              Number(right.tool_sequence === order.sequence) -
-              Number(left.tool_sequence === order.sequence),
+              Number(right.tool_sequence === requestedToolSequence) -
+              Number(left.tool_sequence === requestedToolSequence),
           )[0];
-        const sources: Array<[number, ProductivitySource]> = [
-          [
-            numberValue(learned?.average_actual_productivity_kg_h),
-            "aprendizado",
-          ],
-          [numberValue(order.last_productivity_kg_h), "simplificada"],
-          [readSheetProductivity(sheet?.parameters ?? null), "ficha"],
-          [numberValue(tool?.productivity_kg_h), "ferramenta"],
-          [
-            settingMap[order.machine_code]?.defaultProductivityKgH ?? 1000,
-            "padrao",
-          ],
+        const sources: Array<[number | null, ProductivitySource]> = [
+          [normalizeProductivityKgH(order.last_productivity_kg_h), "simplificada"],
+          [normalizeProductivityKgH(readSheetProductivity(sheet?.parameters ?? null)), "ficha"],
+          [normalizeProductivityKgH(tool?.productivity_kg_h), "ferramenta"],
+          [normalizeProductivityKgH(learned?.average_actual_productivity_kg_h), "aprendizado"],
+          [DEFAULT_PRODUCTIVITY_KG_H, "padrao"],
         ];
-        const productivity = sources.find(([value]) => value > 0) ?? [
-          1000,
+        const productivity = sources.find(([value]) => value !== null) ?? [
+          DEFAULT_PRODUCTIVITY_KG_H,
           "padrao" as const,
         ];
+        const guardedProductivity = guardProductivityKgH(productivity[0], order.alloy_code);
+        const guardedProductivitySource: ProductivitySource =
+          productivity[0] !== guardedProductivity ? "padrao" : productivity[1];
         const cycle = rawCycles.find(
           (item) => item.production_order_id === order.id,
         )?.tool_heating_cycles;
@@ -821,12 +989,12 @@ export function MachineLoadSimulator() {
             item.isActive &&
             item.toolCode.toUpperCase() === order.tool_code.toUpperCase() &&
             (!item.machineCode || item.machineCode === order.machine_code) &&
-            (!item.sequenceNumber || item.sequenceNumber === order.sequence),
+            (!item.sequenceNumber || item.sequenceNumber === requestedToolSequence),
         );
         const mapping = matchingMappings.sort(
           (left, right) =>
-            Number(right.sequenceNumber === order.sequence) -
-              Number(left.sequenceNumber === order.sequence) ||
+            Number(right.sequenceNumber === requestedToolSequence) -
+              Number(left.sequenceNumber === requestedToolSequence) ||
             Number(!!right.machineCode) - Number(!!left.machineCode),
         )[0];
         const packageMeasureMm =
@@ -862,10 +1030,13 @@ export function MachineLoadSimulator() {
           sequence: order.sequence ?? 9999,
           dueDate: order.due_date,
           status: order.status,
-          productivityKgH: productivity[0] as number,
-          productivitySource: productivity[1] as ProductivitySource,
+          productivityKgH: guardedProductivity,
+          productivitySource: guardedProductivitySource,
           toolReadyAt,
           toolHeatingState,
+          toolHeatingEnteredAt: cycle?.entered_at ? new Date(cycle.entered_at) : null,
+          toolOvenCode: cycle?.tool_ovens?.code ?? null,
+          toolOvenPosition: cycle?.oven_position ?? null,
           holes:
             numberValue(order.holes) ||
             numberValue(sourceData.furos) ||
@@ -902,6 +1073,15 @@ export function MachineLoadSimulator() {
           isActive: shift.is_active,
         })),
       );
+      setOvertimePeriods((productionSettings.overtime_periods ?? []).map((period) => ({
+        id: period.id,
+        date: period.work_date,
+        startTime: period.start_time.slice(0, 5),
+        endTime: period.end_time.slice(0, 5),
+        machineCodes: period.machine_codes ?? [],
+        reason: period.reason,
+        isActive: period.is_active,
+      })));
       const initialStart = new Date();
       setStartedAt(initialStart);
       setStartInput(toInputDateTime(initialStart));
@@ -947,20 +1127,11 @@ export function MachineLoadSimulator() {
         .filter((code) => !allowedMachines || allowedMachines.has(code)),
     ),
   ].sort();
-  const simulationState = useMemo(() => {
-    if (!startedAt) return { simulation: null, problem: "" };
-    try {
-      return {
-        simulation: simulateMachineLoad(
-          orderedVisibleOrders,
-          settings,
-          startedAt,
-          mode === "manual" ? "fifo" : mode,
-          shifts,
-          unavailability,
-          {
+  const decisionResources = useMemo(() => ({
             carcasses: carcassResources.map((item) => ({
               code: item.carcassCode,
+              totalQuantity: item.totalQuantity,
+              unavailableQuantity: item.unavailableQuantity,
               capacity:
                 item.status === "available"
                   ? Math.max(
@@ -984,7 +1155,20 @@ export function MachineLoadSimulator() {
               capacity:
                 item.status === "available" ? item.availableQuantity : 0,
             })),
-          },
+          }), [carcassResources, boResources]);
+  const simulationState = useMemo(() => {
+    if (!startedAt) return { simulation: null, problem: "" };
+    try {
+      return {
+        simulation: simulateMachineLoad(
+          orderedVisibleOrders,
+          settings,
+          startedAt,
+          mode === "manual" ? "fifo" : mode,
+          shifts,
+          unavailability,
+          decisionResources,
+          overtimePeriods,
         ),
         problem: "",
       };
@@ -1003,9 +1187,9 @@ export function MachineLoadSimulator() {
     startedAt,
     mode,
     shifts,
+    overtimePeriods,
     unavailability,
-    carcassResources,
-    boResources,
+    decisionResources,
   ]);
   const currentAnalysis = useMemo(
     () =>
@@ -1022,6 +1206,27 @@ export function MachineLoadSimulator() {
         : null,
     [simulationState.simulation, billetStock, intelligence.settings],
   );
+  const decisionContext = useMemo<DecisionContext | null>(() => startedAt && simulationState.simulation ? ({
+    // A sequência da Simplificada fica preservada separadamente. Mesmo em modo
+    // manual ou sugerido, os quatro cenários sempre partem do mesmo baseline.
+    orders: orderedVisibleOrders.map((order) => ({ ...order })),
+    originalOrders: visibleOrders.map((order) => ({ ...order })),
+    settings, start: startedAt, shifts, unavailable: unavailability, overtimePeriods, resources: decisionResources,
+    stock: billetStock.map(item => ({ alloyCode: item.alloyCode, availableBars: item.availableBars, availableWeightKg: numberValue(item.availableWeightKg) })),
+    stockKnown: billetStockAvailable,
+  }) : null, [startedAt, simulationState.simulation, orderedVisibleOrders, visibleOrders, settings, shifts, unavailability, overtimePeriods, decisionResources, billetStock, billetStockAvailable]);
+  function applyDecisionCandidate(candidate: DecisionCandidate) {
+    if (!canPlan) { setScenarioNotice("Seu acesso permite consultar. Peça ao PCP para aplicar a sequência."); return; }
+    const currentIds = new Set(orderedVisibleOrders.filter(order => order.targetKg > order.producedKg).map(order => order.id));
+    const proposedIds = Object.values(candidate.orderIds).flat();
+    if (proposedIds.length !== currentIds.size || new Set(proposedIds).size !== currentIds.size || proposedIds.some(id => !currentIds.has(id))) {
+      setScenarioNotice("A carga mudou. Gere uma nova alternativa antes de aplicar."); return;
+    }
+    setManualOrder(candidate.orderIds); setMode("manual"); setHistoricalScenario(null);
+    if (candidate.sequenceChange) setSequenceChanges(current => [...current, candidate.sequenceChange!]);
+    setAiAnalysis(null);
+    setScenarioNotice(`Estratégia "${candidate.name}" carregada para avaliação manual. Confira e salve o cenário se desejar.`);
+  }
   async function openScenarioList() {
     setScenarioBusy(true);
     setScenarioError("");
@@ -1073,6 +1278,7 @@ export function MachineLoadSimulator() {
         result: hydrateSimulation(payload.result),
       };
       setHistoricalScenario(loaded);
+      setSequenceChanges(loaded.inputs?.sequenceChanges ?? []);
       setScenarioId(loaded.scenarioId);
       setScenarioName(loaded.name);
       setScenarioDescription(loaded.description ?? "");
@@ -1114,14 +1320,17 @@ export function MachineLoadSimulator() {
           inputSnapshot: {
             selectedMachine: machine,
             manualOrder,
+            sequenceChanges,
             orders: orderedVisibleOrders,
           },
           rulesSnapshot: {
             modelVersion: SIMULATION_MODEL_VERSION,
+            decisionProfile,
             settingsByMachine: settings,
             shifts,
             unavailability,
             billetStock: {
+              confirmed: billetStockAvailable,
               capturedAt: new Date().toISOString(),
               summary: billetStock,
             },
@@ -1135,7 +1344,7 @@ export function MachineLoadSimulator() {
             },
           },
           resultSnapshot: simulationState.simulation,
-          analysisSnapshot: currentAnalysis ?? {},
+          analysisSnapshot: { ...currentAnalysis, decision: decisionContext ? evaluateDecision(simulationState.simulation, decisionProfile, decisionContext.stock, decisionContext.stockKnown) : null },
         }),
       });
       const payload = (await response.json().catch(() => null)) as {
@@ -1145,9 +1354,10 @@ export function MachineLoadSimulator() {
       } | null;
       if (!response.ok)
         throw new Error(payload?.error || "Não foi possível salvar o cenário.");
-      setScenarioId(payload?.id ?? null);
+      const savedScenarioId = payload?.id ?? scenarioId;
+      setScenarioId(savedScenarioId);
       setScenarioNotice(
-        `Cenário salvo com segurança como versão ${payload?.versionNumber ?? 1}.`,
+        `${savedScenarioId ? `${simulationDisplayId(savedScenarioId)} · ` : ""}cenário salvo com segurança como versão ${payload?.versionNumber ?? 1}.`,
       );
       setScenarioPanel(null);
     } catch (cause) {
@@ -1184,7 +1394,7 @@ export function MachineLoadSimulator() {
         );
       setHistoricalScenario({ ...historicalScenario, status: "approved" });
       setScenarioNotice(
-        "Cenário aprovado e aplicado. A sequência e as reservas foram registradas na auditoria.",
+        `${simulationDisplayId(historicalScenario.scenarioId)} · v${historicalScenario.versionNumber} aprovada e aplicada às prensas. A Simplificada original foi preservada para consulta e auditoria.`,
       );
     } catch (cause) {
       setScenarioError(
@@ -1259,6 +1469,7 @@ export function MachineLoadSimulator() {
     );
   const simulation = historicalScenario?.result ?? simulationState.simulation;
   if (!simulation) return null;
+  const shiftGoals = evaluateShiftGoals(simulation);
   const simulatedMachines = simulation.machines;
   const displayedBilletStock = historicalScenario
     ? (historicalScenario.rules?.billetStock?.summary ?? [])
@@ -1303,10 +1514,13 @@ export function MachineLoadSimulator() {
           : latest,
     null,
   );
-  const allSectionsExpanded = machineLoadSectionKeys.every(
-    (key) => expandedSections[key],
+  const visibleSectionKeys = machineLoadSectionKeys.filter(
+    (key) => sectionVisibility[key],
   );
-  function toggleSection(key: MachineLoadSectionKey) {
+  const allSectionsExpanded = machineLoadSectionKeys.every(
+    (key) => !sectionVisibility[key] || expandedSections[key],
+  );
+  function toggleSection(key: (typeof machineLoadSectionKeys)[number]) {
     setExpandedSections((current) => ({
       ...current,
       [key]: !current[key],
@@ -1316,7 +1530,7 @@ export function MachineLoadSimulator() {
     setExpandedSections(
       Object.fromEntries(
         machineLoadSectionKeys.map((key) => [key, expanded]),
-      ) as Record<MachineLoadSectionKey, boolean>,
+      ) as Record<(typeof machineLoadSectionKeys)[number], boolean>,
     );
   }
   async function requestAiAnalysis() {
@@ -1337,6 +1551,11 @@ export function MachineLoadSimulator() {
             displayedBilletStock,
             displayedCarcassResources,
             displayedBoResources,
+            !historicalScenario && decisionContext ? {
+              profile: decisionProfile,
+              evaluation: evaluateDecision(simulation!, decisionProfile, decisionContext.stock, decisionContext.stockKnown),
+              instruction: "Explique as regras efetivamente avaliadas. Não transforme estimativas em garantias nem ignore impedimentos."
+            } : undefined,
           ),
         ),
       });
@@ -1435,6 +1654,7 @@ export function MachineLoadSimulator() {
 
   return (
     <div className="space-y-4">
+      <div className="flex justify-end"><LoadHelpGuide /></div>
       {historicalScenario ? (
         <section className="flex flex-wrap items-center gap-3 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950">
           <FolderOpen className="size-5 text-blue-600" />
@@ -1444,6 +1664,12 @@ export function MachineLoadSimulator() {
               {historicalScenario.versionNumber}
             </strong>
             <span className="text-xs text-blue-700">
+              <span
+                className="mr-2 font-mono font-bold"
+                title={`ID completo da simulação: ${historicalScenario.scenarioId}`}
+              >
+                {simulationDisplayId(historicalScenario.scenarioId)}
+              </span>
               Cenário congelado em{" "}
               {formatDateTime(new Date(historicalScenario.createdAt))}. Status:{" "}
               {historicalScenario.status === "approved"
@@ -1463,7 +1689,7 @@ export function MachineLoadSimulator() {
               ) : (
                 <CheckCircle2 className="size-4" />
               )}
-              Aprovar e aplicar
+              Aprovar sequência de trabalho
             </Button>
           ) : null}
           <Button
@@ -1559,6 +1785,19 @@ export function MachineLoadSimulator() {
             .map((shift) => `${shift.code} ${shift.startTime}–${shift.endTime}`)
             .join(" · ")}
         </span>
+        {!historicalScenario && decisionContext ? <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="border-violet-300 bg-violet-50 text-violet-900 hover:bg-violet-100"
+          onClick={() => {
+            document.getElementById("central-de-decisoes")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            window.dispatchEvent(new Event("open-decision-workspace"));
+          }}
+        >
+          <BrainCircuit className="size-4" />
+          Central de Decisões
+        </Button> : null}
         <Button
           variant="outline"
           size="sm"
@@ -1592,45 +1831,69 @@ export function MachineLoadSimulator() {
         </Button>
       </section>
 
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <section className="flex gap-3 overflow-x-auto pb-1 lg:grid lg:grid-cols-5 lg:overflow-visible">
         <Metric
           icon={Boxes}
           label="Carga ativa"
+          helpTopic="activeLoad"
           value={`${formatNumber(simulation.totalDemandKg, 0)} kg`}
+          className="w-[250px] shrink-0 lg:w-auto"
         />
         <Metric
           icon={Gauge}
-          label="Tempo teórico"
+          label="Produção líquida · soma das prensas"
+          helpTopic="netTime"
           value={formatDuration(simulation.totalTheoreticalMinutes)}
           tone="orange"
+          className="w-[250px] shrink-0 lg:w-auto"
         />
         <Metric
           icon={CalendarClock}
           label="Término simulado"
+          helpTopic="end"
           value={formatDateTime(estimatedEnd)}
           tone="blue"
+          className="w-[250px] shrink-0 lg:w-auto"
         />
         <Metric
           icon={PackageOpen}
           label="Barras a preparar"
+          helpTopic="bars"
           value={`${simulation.totalBars}`}
           tone="violet"
+          className="w-[250px] shrink-0 lg:w-auto"
         />
         <Metric
           icon={Route}
           label="Itens na sequência"
+          helpTopic="items"
           value={`${simulation.machines.reduce((sum, item) => sum + item.items.length, 0)}`}
           tone="green"
+          className="w-[250px] shrink-0 lg:w-auto"
         />
       </section>
+      {!historicalScenario && decisionContext && <DecisionWorkspace
+        context={decisionContext} profile={decisionProfile} canEdit={role === "admin"} canAdjust={canPlan}
+        onProfile={setDecisionProfile} onApply={applyDecisionCandidate}
+      />}
+      {sequenceChanges.length > 0 && <details className="rounded-xl border bg-white p-4">
+        <summary className="cursor-pointer text-sm font-bold">Motivos das mudanças de sequência ({sequenceChanges.length})</summary>
+        <p className="mt-2 text-xs text-slate-500">{historicalScenario ? "Registro guardado nesta versão do cenário." : "Registro desta sessão. Salve o cenário para guardar os motivos no histórico."}</p>
+        <ol className="mt-3 space-y-3">{sequenceChanges.map((change,index)=><li key={index} className="rounded-lg bg-slate-50 p-3 text-sm">
+          <strong>{change.toolCode} · prensa {change.machineCode} · posição {change.from} → {change.to}</strong>
+          <p>{change.reason}</p><span className="text-xs text-slate-500">{formatDateTime(new Date(change.recordedAt))}</span>
+        </li>)}</ol>
+      </details>}
       <section className="flex flex-col gap-3 rounded-2xl border bg-white px-4 py-3 shadow-sm sm:flex-row sm:items-center">
         <div className="flex-1">
           <h2 className="font-heading font-bold text-slate-950">
             Seções da Carga Máquina
           </h2>
           <p className="text-xs text-slate-500">
-            Abra somente o que precisa consultar. Os riscos continuam resumidos
-            mesmo com as seções fechadas.
+            {visibleSectionKeys.length} de {machineLoadSectionKeys.length} seções visíveis. <Link
+              href="/configuracoes"
+              className="ml-1 inline-flex items-center gap-1 font-bold text-violet-700 underline decoration-violet-300 underline-offset-2 transition hover:text-violet-900"
+            ><Settings2 className="size-3" /> Ajustar exibição</Link>
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -1639,7 +1902,7 @@ export function MachineLoadSimulator() {
             variant="outline"
             size="sm"
             onClick={() => setAllSections(true)}
-            disabled={allSectionsExpanded}
+            disabled={allSectionsExpanded || visibleSectionKeys.length === 0}
           >
             <ChevronDown className="size-4" /> Expandir tudo
           </Button>
@@ -1648,16 +1911,23 @@ export function MachineLoadSimulator() {
             variant="outline"
             size="sm"
             onClick={() => setAllSections(false)}
-            disabled={machineLoadSectionKeys.every(
-              (key) => !expandedSections[key],
-            )}
+            disabled={visibleSectionKeys.length === 0 || visibleSectionKeys.every((key) => !expandedSections[key])}
           >
             <ChevronUp className="size-4" /> Recolher tudo
           </Button>
         </div>
       </section>
 
-      {planningAnalysis ? (
+      {visibleSectionKeys.length === 0 ? (
+        <section className="rounded-2xl border border-dashed border-violet-300 bg-violet-50 px-5 py-6 text-sm text-violet-950 shadow-sm">
+          <strong className="block">Nenhuma seção está visível.</strong>
+          <span className="mt-1 block text-xs text-violet-800">
+            Abra Configurações para escolher quais partes da Base Teste · IA devem aparecer.
+          </span>
+        </section>
+      ) : null}
+
+      {sectionVisibility.intelligence && planningAnalysis ? (
         <CollapsibleDashboardSection
           title="Inteligência explicável e copiloto de decisão"
           summary={`Nota ${planningAnalysis.score.overall} de 100 · ${planningAnalysis.summary.conflicts} bloqueio(s) · ${planningAnalysis.summary.predictedIdleMinutes} min de espera previstos`}
@@ -1668,14 +1938,14 @@ export function MachineLoadSimulator() {
           <PlanningIntelligencePanel
             analysis={planningAnalysis}
             weights={intelligence.settings}
-            canEdit={canPlan && !historicalScenario}
-            aiConfigured={Boolean(intelligence.aiConfigured)}
-            onSave={saveIntelligenceWeights}
+            canEdit={false}
+          aiConfigured={Boolean(intelligence.aiConfigured)}
+          onSave={saveIntelligenceWeights}
           />
         </CollapsibleDashboardSection>
       ) : null}
 
-      <CollapsibleDashboardSection
+      {sectionVisibility.copilot ? <CollapsibleDashboardSection
         title="Copiloto de decisão"
         summary={
           aiBusy
@@ -1694,6 +1964,7 @@ export function MachineLoadSimulator() {
           analysis={aiAnalysis}
           busy={aiBusy}
           error={aiError}
+          shiftGoals={shiftGoals}
           onAnalyze={() => void requestAiAnalysis()}
           onApplyScenario={applyAiScenario}
           orderLabels={Object.fromEntries(
@@ -1702,15 +1973,15 @@ export function MachineLoadSimulator() {
             ),
           )}
         />
-      </CollapsibleDashboardSection>
+      </CollapsibleDashboardSection> : null}
 
-      <PlanningLearningPanel
+      {sectionVisibility.learning ? <PlanningLearningPanel
         data={intelligence}
         expanded={expandedSections.learning}
         onToggle={() => toggleSection("learning")}
-      />
+      /> : null}
 
-      <CollapsibleDashboardSection
+      {sectionVisibility.thermal ? <CollapsibleDashboardSection
         title="Prontidão térmica das prensas"
         summary={`${simulation.machines.filter((item) => item.thermalCoverage.status === "risk").length} prensa(s) com risco · ${simulation.machines.filter((item) => item.thermalCoverage.status === "attention").length} em atenção`}
         expanded={expandedSections.thermal}
@@ -1724,9 +1995,9 @@ export function MachineLoadSimulator() {
         }
       >
         <ThermalCoveragePanel machines={simulation.machines} />
-      </CollapsibleDashboardSection>
+      </CollapsibleDashboardSection> : null}
 
-      <CollapsibleDashboardSection
+      {sectionVisibility.alerts ? <CollapsibleDashboardSection
         title="Alertas, materiais e recursos compartilhados"
         summary={`${simulation.conflicts.filter((item) => item.severity === "blocking").length} impedimento(s) · carcaças, BOs, tarugos e calendário`}
         expanded={expandedSections.alerts}
@@ -1758,9 +2029,9 @@ export function MachineLoadSimulator() {
           periods={displayedUnavailability}
           machines={simulation.machines.map((item) => item.machineCode)}
         />
-      </CollapsibleDashboardSection>
+      </CollapsibleDashboardSection> : null}
 
-      <CollapsibleDashboardSection
+      {sectionVisibility.simulation ? <CollapsibleDashboardSection
         title="Simulação operacional"
         summary={`${simulation.machines.reduce((sum, item) => sum + item.items.length, 0)} itens · término ${formatDateTime(estimatedEnd)} · Gantt, tabela e tarugos`}
         expanded={expandedSections.simulation}
@@ -1777,7 +2048,9 @@ export function MachineLoadSimulator() {
                 Prensa + ferramenta/forno + carcaça + tarugo/liga.
               </p>
             </div>
-            <div className="flex rounded-xl bg-slate-100 p-1">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <PlanningEnginePremises report={shiftGoals} pressForecasts={pressPlansForSimulation(simulation)} />
+              <div className="flex rounded-xl bg-slate-100 p-1">
               <button
                 type="button"
                 onClick={() => setTab("gantt")}
@@ -1802,6 +2075,7 @@ export function MachineLoadSimulator() {
                 <PackageOpen className="mr-1 inline size-3.5" />
                 Tarugo
               </button>
+              </div>
             </div>
           </div>
           {tab === "gantt" ? (
@@ -1831,7 +2105,7 @@ export function MachineLoadSimulator() {
             simultâneo; a aprovação só ocorre com estoque físico suficiente.
           </p>
         </div>
-      </CollapsibleDashboardSection>
+      </CollapsibleDashboardSection> : null}
       {scenarioPanel ? (
         <ScenarioDialog
           mode={scenarioPanel}
@@ -1982,6 +2256,12 @@ function ScenarioDialog({
                       <strong className="truncate text-sm text-slate-950">
                         {scenario.name}
                       </strong>
+                      <span
+                        className="rounded-full bg-violet-100 px-2 py-0.5 font-mono text-[10px] font-black text-violet-800"
+                        title={`ID completo da simulação: ${scenario.id}`}
+                      >
+                        {simulationDisplayId(scenario.id)}
+                      </span>
                       <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-600">
                         v{scenario.currentVersion}
                       </span>
@@ -2337,9 +2617,10 @@ function CollapsibleDashboardSection({
     red: "bg-red-100 text-red-700",
     blue: "bg-blue-100 text-blue-700",
   }[tone];
+  const helpTopic: LoadHelpKey | undefined = ({ "Copiloto de decisão": "ai", "Inteligência explicável e copiloto de decisão": "legacyScore", "Simulação operacional": "sequence" } as Record<string, LoadHelpKey>)[title];
   return (
     <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
-      <button
+      <div className="flex items-center pr-3"><button
         type="button"
         aria-expanded={expanded}
         onClick={onToggle}
@@ -2365,7 +2646,7 @@ function CollapsibleDashboardSection({
         <span className="shrink-0 rounded-lg border bg-white px-3 py-2 text-xs font-bold text-slate-600">
           {expanded ? "Recolher" : "Expandir"}
         </span>
-      </button>
+      </button>{helpTopic && <FieldHelp topic={helpTopic} />}</div>
       {expanded ? (
         <div className="space-y-3 border-t bg-slate-50/50 p-3 sm:p-4">
           {children}
@@ -2938,6 +3219,52 @@ function PlanningIntelligencePanel({
                 ) : null}
                 <div className="mt-4 grid gap-4 sm:grid-cols-2">
                   <label className="text-sm font-bold">
+                    Provedor de IA
+                    <select
+                      value={draft.aiProvider}
+                      onChange={(event) => {
+                        const aiProvider = event.target.value as IntelligenceWeights["aiProvider"];
+                        setDraft({
+                          ...draft,
+                          aiProvider,
+                          aiModelMode: aiProvider === "openrouter" ? draft.aiModelMode : "manual",
+                          aiModel:
+                            aiProvider === "openrouter"
+                              ? draft.aiModel || "openrouter/auto"
+                              : aiProvider === "lmstudio"
+                                ? draft.aiModel === "openrouter/auto" ? "" : draft.aiModel
+                                : "",
+                        });
+                      }}
+                      className="mt-1.5 h-11 w-full rounded-xl border bg-white px-3"
+                    >
+                      <option value="openrouter">OpenRouter</option>
+                      <option value="lmstudio">LM Studio · local</option>
+                      <option value="openai">OpenAI API</option>
+                      <option value="openclaw">OpenClaw · servidor aprovado</option>
+                    </select>
+                  </label>
+                  <label className="text-sm font-bold">
+                    Endpoint do provedor
+                    <input
+                      value={draft.aiProviderEndpoint}
+                      onChange={(event) => setDraft({ ...draft, aiProviderEndpoint: event.target.value })}
+                      placeholder={draft.aiProvider === "lmstudio" ? "http://127.0.0.1:1234/v1" : draft.aiProvider === "openclaw" ? "https://servidor-aprovado/v1" : "Padrão seguro do provedor"}
+                      className="mt-1.5 h-11 w-full rounded-xl border bg-white px-3 font-normal"
+                    />
+                    <span className="mt-1 block text-[10px] font-normal text-slate-500">A chave não é salva aqui; ela fica somente no servidor. Endpoints externos são conferidos pelo servidor.</span>
+                  </label>
+                  <label className="flex items-start gap-2 rounded-xl border bg-white p-3 text-xs text-slate-700 sm:col-span-2">
+                    <input
+                      type="checkbox"
+                      checked={draft.aiExternalDataEnabled}
+                      onChange={(event) => setDraft({ ...draft, aiExternalDataEnabled: event.target.checked })}
+                      className="mt-0.5 size-4 accent-violet-600"
+                    />
+                    <span><strong className="block text-sm text-slate-900">Permitir enviar o pacote mínimo para um provedor externo</strong>Desative para impedir análises por OpenRouter, OpenAI e OpenClaw. O LM Studio local continua disponível. A IA recebe somente o contexto compacto desta análise.</span>
+                  </label>
+                  {draft.aiProvider === "openrouter" ? <>
+                  <label className="text-sm font-bold">
                     Seleção do modelo
                     <select
                       value={draft.aiModelMode}
@@ -3027,6 +3354,31 @@ function PlanningIntelligencePanel({
                       </span>
                     ) : null}
                   </label>
+                  </> : <label className="text-sm font-bold sm:col-span-2">
+                    Modelo
+                    {providerModelOptions[draft.aiProvider].length ? (
+                      <select
+                        value={providerModelOptions[draft.aiProvider].some((model) => model.id === draft.aiModel) ? draft.aiModel : "custom"}
+                        onChange={(event) => setDraft({ ...draft, aiModel: event.target.value === "custom" ? "" : event.target.value })}
+                        className="mt-1.5 h-11 w-full rounded-xl border bg-white px-3 font-normal"
+                      >
+                        <option value="" disabled>Selecione um modelo</option>
+                        {providerModelOptions[draft.aiProvider].map((model) => (
+                          <option key={model.id} value={model.id}>{model.name}</option>
+                        ))}
+                        <option value="custom">Outro identificador…</option>
+                      </select>
+                    ) : null}
+                    {(!providerModelOptions[draft.aiProvider].length || !providerModelOptions[draft.aiProvider].some((model) => model.id === draft.aiModel)) ? (
+                      <input
+                        value={draft.aiModel === "openrouter/auto" ? "" : draft.aiModel}
+                        onChange={(event) => setDraft({ ...draft, aiModel: event.target.value })}
+                        placeholder={draft.aiProvider === "lmstudio" ? "Identificador do modelo carregado no LM Studio" : "Modelo configurado neste provedor"}
+                        className="mt-1.5 h-11 w-full rounded-xl border bg-white px-3 font-normal"
+                      />
+                    ) : null}
+                    <span className="mt-1 block text-[10px] font-normal text-slate-500">Escolha uma opção ou informe o identificador exato. Use “Equipe de IA” para testar a conexão antes de uma rodada operacional.</span>
+                  </label>}
                   <NumberSetting
                     label="Máximo de recomendações"
                     value={draft.aiMaxRecommendations}
@@ -3115,8 +3467,10 @@ function PlanningIntelligencePanel({
                 disabled={
                   busy ||
                   total !== 100 ||
-                  (draft.aiModelMode === "manual" &&
-                    (!draft.aiModel || draft.aiModel === "openrouter/auto"))
+                  (draft.aiProvider === "openrouter"
+                    ? draft.aiModelMode === "manual" &&
+                      (!draft.aiModel || draft.aiModel === "openrouter/auto")
+                    : !draft.aiModel)
                 }
                 onClick={() => void save()}
               >
@@ -3145,6 +3499,7 @@ function AiDecisionPanel({
   analysis,
   busy,
   error,
+  shiftGoals,
   onAnalyze,
   onApplyScenario,
   orderLabels,
@@ -3154,6 +3509,7 @@ function AiDecisionPanel({
   analysis: AiAnalysisEnvelope | null;
   busy: boolean;
   error: string;
+  shiftGoals: ShiftGoalsReport;
   onAnalyze: () => void;
   onApplyScenario: () => void;
   orderLabels: Record<string, string>;
@@ -3170,6 +3526,7 @@ function AiDecisionPanel({
     medium: "Melhoria",
     opportunity: "Oportunidade",
   } as const;
+  const validation = analysis?.result.validation;
   return (
     <div className="rounded-xl bg-gradient-to-r from-violet-50/80 via-white to-blue-50/70 p-5">
       <div className="flex flex-col gap-3 md:flex-row md:items-center">
@@ -3184,8 +3541,8 @@ function AiDecisionPanel({
             Analista IA de PCP e Processos
           </h3>
           <p className="text-xs text-slate-500">
-            Interpreta somente o pacote compacto da simulação; regras físicas e
-            bloqueios continuam soberanos.
+            Explica os dados da simulação e propõe ações para você conferir.
+            Os impedimentos físicos continuam valendo.
           </p>
         </div>
         <Button
@@ -3203,14 +3560,21 @@ function AiDecisionPanel({
       </div>
       {!configured ? (
         <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-800">
-          Integração preparada, mas sem chave segura no servidor. Gere uma nova
-          chave e configure <code>OPENROUTER_API_KEY</code>.
+          Integração preparada, mas nenhum provedor está configurado no servidor.
+          Configure OpenRouter, OpenAI, LM Studio local ou OpenClaw nos critérios.
         </p>
       ) : !enabled ? (
         <p className="mt-3 rounded-xl border bg-white p-3 text-xs text-slate-600">
-          Ative a IA em “Ajustar critérios” para liberar esta análise.
+          Ative a IA em Configurações → Critérios e analista IA do AluPilot para liberar esta análise.
         </p>
       ) : null}
+        <div className="mt-3 grid gap-2 rounded-xl border border-violet-200 bg-white p-3 text-xs sm:grid-cols-5">
+        <div><span className="block font-bold uppercase tracking-wide text-slate-500">Produção acumulada</span><strong>{formatNumber(shiftGoals.projectedKg, 0)} kg · {formatNumber(shiftGoals.projectedTonnes, 1)} t</strong></div>
+        <div><span className="block font-bold uppercase tracking-wide text-slate-500">Média operacional da janela ({shiftGoals.goals.productivityBasis})</span><strong>{formatNumber(shiftGoals.averageProductivityKgH, 0)} kg/h</strong><small className="mt-1 block text-xs text-slate-500">não é a previsão da Simplificada</small></div>
+        <div><span className="block font-bold uppercase tracking-wide text-slate-500">Técnica / operacional</span><strong>{formatNumber(shiftGoals.productivity.technicalKgH, 0)} / {formatNumber(shiftGoals.productivity.operationalKgH, 0)} kg/h</strong></div>
+        <div><span className="block font-bold uppercase tracking-wide text-slate-500">Cobertura</span><strong>{formatNumber(shiftGoals.productivity.loadCoveragePercent, 1)}%</strong></div>
+        <div><span className="block font-bold uppercase tracking-wide text-slate-500">Meta do turno</span><strong>{shiftGoals.shiftsMeetingBothTargets}/{shiftGoals.shifts.length || 0} turno(s) atendem as duas metas</strong></div>
+      </div>
       {error ? (
         <p className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs font-semibold text-red-700">
           {error}
@@ -3260,6 +3624,28 @@ function AiDecisionPanel({
             <p className="mt-3 text-sm leading-6 text-slate-700">
               {analysis.result.executiveSummary}
             </p>
+            {validation ? (
+              <div className={`mt-3 rounded-xl border p-3 text-xs ${validation.status === "feasible" ? "border-emerald-200 bg-emerald-50 text-emerald-900" : validation.status === "blocked" ? "border-red-200 bg-red-50 text-red-900" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
+                <strong className="block">Validação do motor: {validation.status === "feasible" ? "sem impedimento conhecido" : validation.status === "blocked" ? "não viável agora" : validation.status === "not_evaluated" ? "aguarda recálculo da alternativa" : "precisa de conferência"}</strong>
+                <span>{validation.reason} {validation.hardViolations ? `${validation.hardViolations} impedimento(s). ` : ""}{validation.unknowns ? `${validation.unknowns} dado(s) pendente(s).` : ""}</span>
+              </div>
+            ) : null}
+            {analysis.result.planningChanges?.length ? (
+              <div className="mt-3 rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs text-blue-950">
+                <strong className="block">O que a IA sugere mudar</strong>
+                <span>
+                  {analysis.result.planningChanges.length} posição(ões) seriam alteradas. A cópia da simulação será recalculada antes de qualquer decisão humana.
+                </span>
+              </div>
+            ) : null}
+            {analysis.result.resourceConflicts?.length ? (
+              <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-900">
+                <strong className="block">Conflitos de recurso encontrados</strong>
+                <ul className="mt-1 list-disc space-y-1 pl-4">
+                  {analysis.result.resourceConflicts.slice(0, 3).map((conflict) => <li key={conflict}>{conflict}</li>)}
+                </ul>
+              </div>
+            ) : null}
             {analysis.result.missingData.length ? (
               <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
                 <strong className="block">Antes de decidir, confira:</strong>
@@ -3280,13 +3666,18 @@ function AiDecisionPanel({
                 Ver informações técnicas da análise
               </summary>
               <p className="mt-1">
-                Confiança calculada: {Math.round(analysis.result.confidence)}% ·{" "}
+                Avaliação declarada pelo analista (não é garantia): {Math.round(analysis.result.confidence)}% ·{" "}
                 modelo {analysis.modelUsed} ·{" "}
                 {(analysis.durationMs / 1000).toLocaleString("pt-BR", {
                   maximumFractionDigits: 1,
                 })}
                 s{analysis.cached ? " · resultado reaproveitado" : ""}
               </p>
+              {analysis.result.contract ? (
+                <p className="mt-1">
+                  Contrato {analysis.result.contract.schemaVersion} · snapshot {analysis.result.contract.provenance.snapshotId} · regras {analysis.result.contract.provenance.engineVersion}.
+                </p>
+              ) : null}
             </details>
           </article>
           <div className="grid gap-3">
@@ -3309,10 +3700,11 @@ function AiDecisionPanel({
                 <Button
                   type="button"
                   onClick={onApplyScenario}
+                  disabled={validation?.status === "blocked"}
                   className="shrink-0 bg-violet-600 text-white hover:bg-violet-700"
                 >
                   <Sparkles className="size-4" />
-                  Testar esta sequência
+                  {validation?.status === "blocked" ? "Corrigir impedimentos antes" : "Testar esta sequência"}
                 </Button>
               </div>
               <div className="mt-3 grid gap-2">
@@ -3359,8 +3751,7 @@ function AiDecisionPanel({
                 </div>
               </div>
               <p className="mt-3 text-[10px] font-semibold text-slate-500">
-                Este botão não inicia nem aprova a produção. Ele apenas coloca a
-                sequência na simulação para você conferir e ajustar.
+                A sugestão não inicia nem aprova produção. Ela apenas abre uma cópia na simulação, onde o motor recalcula o cenário para sua conferência humana.
               </p>
             </article>
             {analysis.result.recommendations.map((item, index) => (
@@ -3504,7 +3895,9 @@ function PlanningLearningPanel({
 }) {
   const confidence = data.summary.confidencePercent;
   const learningMessage =
-    data.summary.observations === 0
+    data.summary.predictionsCompared === 0
+      ? "Ainda não há comparação entre previsão e resultado real. Não é possível medir a precisão neste momento."
+      : data.summary.observations === 0
       ? "Ainda não há produções concluídas para comparar. Continue registrando o resultado real."
       : confidence < 40
         ? "O sistema ainda está aprendendo. Use os valores como apoio e confirme com o líder antes de mudar a produção."
@@ -3527,8 +3920,7 @@ function PlanningLearningPanel({
             Aprendizado operacional
           </p>
           <h2 className="font-heading font-black">
-            {data.summary.observations} produções registradas · segurança{" "}
-            {formatNumber(confidence, 0)}%
+            {data.summary.observations} produções registradas · {data.summary.predictionsCompared} previsões comparadas
           </h2>
           <p className="text-xs text-slate-500">{learningMessage}</p>
         </div>
@@ -3570,8 +3962,8 @@ function PlanningLearningPanel({
               value={`${data.summary.predictionsCompared}`}
             />
             <LearningMetric
-              label="Segurança para usar a previsão"
-              value={`${formatNumber(confidence, 0)}%`}
+              label="Validação da previsão"
+              value={data.summary.predictionsCompared === 0 ? "Ainda não medida" : "Confira o erro por ferramenta"}
             />
           </div>
           <div className="overflow-x-auto">
@@ -3583,7 +3975,7 @@ function PlanningLearningPanel({
                   <th>Amostras</th>
                   <th>Produção real média</th>
                   <th>Diferença da previsão</th>
-                  <th>Segurança do cálculo</th>
+                  <th>Dados para calibrar</th>
                   <th>Pronto para usar?</th>
                 </tr>
               </thead>
@@ -3604,9 +3996,9 @@ function PlanningLearningPanel({
                     <td>{machineLabel(group.machine_code)}</td>
                     <td>{group.sample_count}</td>
                     <td className="font-bold">
-                      {group.average_actual_productivity_kg_h
-                        ? `${formatNumber(group.average_actual_productivity_kg_h, 0)} kg/h`
-                        : "—"}
+                      {normalizeProductivityKgH(group.average_actual_productivity_kg_h)
+                        ? `${formatNumber(normalizeProductivityKgH(group.average_actual_productivity_kg_h)!, 0)} kg/h`
+                        : "Sem medição válida"}
                     </td>
                     <td>
                       {group.mean_absolute_error_percent == null
@@ -3623,7 +4015,7 @@ function PlanningLearningPanel({
                         />
                       </div>
                       <span className="text-[10px] text-slate-500">
-                        {formatNumber(group.confidence_percent, 0)}%
+                        {group.mean_absolute_error_percent == null ? "Precisão ainda não medida" : "Veja a diferença da previsão"}
                       </span>
                     </td>
                     <td>
@@ -3991,11 +4383,15 @@ function Metric({
   label,
   value,
   tone = "slate",
+  helpTopic,
+  className,
 }: {
   icon: typeof Gauge;
   label: string;
   value: string;
   tone?: "slate" | "orange" | "blue" | "violet" | "green";
+  helpTopic?: LoadHelpKey;
+  className?: string;
 }) {
   const colors = {
     slate: "bg-slate-100 text-slate-700",
@@ -4005,15 +4401,18 @@ function Metric({
     green: "bg-emerald-50 text-emerald-600",
   };
   return (
-    <div className="flex items-center gap-3 rounded-2xl border bg-white p-4 shadow-sm">
+    <div
+      className={`flex min-w-0 items-center gap-3 rounded-2xl border bg-white p-4 shadow-sm ${className ?? ""}`}
+    >
       <span
         className={`grid size-10 place-items-center rounded-xl ${colors[tone]}`}
       >
         <Icon className="size-5" />
       </span>
       <div>
-        <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
+        <p className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">
           {label}
+          {helpTopic && <FieldHelp topic={helpTopic} />}
         </p>
         <p className="text-lg font-black text-slate-900">{value}</p>
       </div>
@@ -4482,7 +4881,7 @@ function Timeline({
       )}
       {machines.map((machine) => (
         <div key={machine.machineCode} className="p-4">
-          <div className="mb-3 flex items-center justify-between">
+          <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
             <div>
               <strong>{machineLabel(machine.machineCode)}</strong>
               <span className="ml-2 text-xs text-slate-500">
@@ -4492,37 +4891,37 @@ function Timeline({
               </span>
             </div>
             <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold text-slate-600">
-              realista {formatDuration(machine.simulatedMinutes)}
+              calendário {formatDuration(machine.simulatedMinutes)} · extrusão {formatDuration(machine.theoreticalMinutes)}
             </span>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[1640px] text-left text-xs">
+          <div className="w-full min-w-0 overflow-x-auto overscroll-x-contain">
+            <table className="w-full min-w-[780px] text-left text-xs min-[1367px]:min-w-[1640px]">
               <thead className="bg-slate-50 text-[9px] uppercase tracking-wide text-slate-500">
                 <tr>
-                  <th className="px-3 py-2"># / Ferramenta</th>
-                  <th className="px-3 py-2">Recursos</th>
-                  <th className="px-3 py-2">Plano</th>
-                  <th className="px-3 py-2">Pedido / ordem</th>
-                  <th className="px-3 py-2">
+                  <th className="px-2 py-2 min-[1367px]:px-3"># / Ferramenta</th>
+                  <th className="hidden px-3 py-2 min-[1367px]:table-cell">Recursos</th>
+                  <th className="hidden px-3 py-2 min-[1367px]:table-cell">Plano</th>
+                  <th className="px-2 py-2 min-[1367px]:px-3">Pedido / ordem</th>
+                  <th className="px-2 py-2 min-[1367px]:px-3">
                     Qtd. pedida
                     <br />
                     <span className="normal-case text-slate-400">líquido</span>
                   </th>
-                  <th className="px-3 py-2">Saldo do pedido</th>
-                  <th className="px-3 py-2">
+                  <th className="hidden px-3 py-2 min-[1367px]:table-cell">Saldo do pedido</th>
+                  <th className="hidden px-3 py-2 min-[1367px]:table-cell">
                     Bruto necessário
                     <br />
                     <span className="normal-case text-slate-400">
                       com eficiência
                     </span>
                   </th>
-                  <th className="px-3 py-2">Preparação</th>
-                  <th className="px-3 py-2">Início</th>
-                  <th className="px-3 py-2">Duração</th>
-                  <th className="px-3 py-2">Fim</th>
-                  <th className="px-3 py-2">Produtividade</th>
-                  <th className="px-3 py-2">Liga / barras</th>
-                  <th className="px-3 py-2">Saldo projetado da liga</th>
+                  <th className="px-2 py-2 min-[1367px]:px-3">Preparação</th>
+                  <th className="px-2 py-2 min-[1367px]:px-3">Início</th>
+                  <th className="px-2 py-2 min-[1367px]:px-3">Duração</th>
+                  <th className="px-2 py-2 min-[1367px]:px-3">Fim</th>
+                  <th className="hidden px-3 py-2 min-[1367px]:table-cell">Produtividade</th>
+                  <th className="hidden px-3 py-2 min-[1367px]:table-cell">Liga / barras</th>
+                  <th className="hidden px-3 py-2 min-[1367px]:table-cell">Saldo projetado da liga</th>
                 </tr>
               </thead>
               <tbody>
@@ -4562,7 +4961,7 @@ function Timeline({
                     }}
                     className={`border-t transition ${manual ? "cursor-grab active:cursor-grabbing" : ""} ${draggedId === item.id ? "opacity-40" : ""} ${overId === item.id ? "bg-orange-100 ring-2 ring-inset ring-orange-400" : "hover:bg-orange-50/30"}`}
                   >
-                    <td className="px-3 py-2.5">
+                    <td className="px-2 py-2 min-[1367px]:px-3 min-[1367px]:py-2.5">
                       <span className="inline-flex items-center">
                         <span className="mr-2 text-slate-400">
                           {String(index + 1).padStart(2, "0")}
@@ -4577,8 +4976,23 @@ function Timeline({
                           {item.toolCode}
                         </strong>
                       </span>
+                      <details className="mt-2 min-[1367px]:hidden">
+                        <summary className="cursor-pointer text-[10px] font-bold text-violet-700">
+                          Ver recursos e cálculo
+                        </summary>
+                        <div className="mt-2 grid gap-2 rounded-lg bg-slate-50 p-2 text-[10px] text-slate-600">
+                          <div className="flex flex-wrap gap-1">
+                            <ResourceChip label="Furos" value={item.holes ? String(item.holes) : "—"} missing={!item.holes} />
+                            <ResourceChip label="BO" value={item.boCode || "—"} missing={!item.boCode} />
+                            <ResourceChip label="Carcaça" value={item.carcassCode || "—"} missing={!item.carcassCode} />
+                          </div>
+                          <p><strong>Plano:</strong> {item.planCode} · <strong>Saldo:</strong> {formatNumber(item.remainingKg)} kg · <strong>Bruto:</strong> {formatNumber(item.billetRequiredKg)} kg</p>
+                          <p><strong>Produtividade:</strong> {formatNumber(item.productivityKgH, 0)} kg/h · {sourceLabel[item.productivitySource]} · <strong>Liga:</strong> {item.selectedAlloy} (+{item.billetBarsLoaded} barra(s))</p>
+                          {projectedBalances[item.id] ? <p><strong>Saldo previsto da liga:</strong> {formatNumber(projectedBalances[item.id].afterKg)} kg</p> : null}
+                        </div>
+                      </details>
                     </td>
-                    <td className="px-3 py-2.5">
+                    <td className="hidden px-3 py-2.5 min-[1367px]:table-cell">
                       <div className="flex min-w-44 flex-wrap gap-1">
                         <ResourceChip
                           label="Furos"
@@ -4595,37 +5009,19 @@ function Timeline({
                           value={item.carcassCode || "—"}
                           missing={!item.carcassCode}
                         />
-                        <ResourceChip
-                          label="Ø"
-                          value={
-                            item.carcassDiameterMm
-                              ? `${item.carcassDiameterMm} mm`
-                              : "—"
-                          }
-                          missing={!item.carcassDiameterMm}
-                        />
-                        <ResourceChip
-                          label="Pacote"
-                          value={
-                            item.packageMeasureMm
-                              ? `${item.packageMeasureMm} mm`
-                              : "—"
-                          }
-                          missing={!item.packageMeasureMm}
-                        />
                       </div>
                     </td>
-                    <td className="px-3 py-2.5 font-bold">{item.planCode}</td>
-                    <td className="px-3 py-2.5 font-mono font-bold text-slate-700">
+                    <td className="hidden px-3 py-2.5 font-bold min-[1367px]:table-cell">{item.planCode}</td>
+                    <td className="px-2 py-2 font-mono font-bold text-slate-700 min-[1367px]:px-3 min-[1367px]:py-2.5">
                       {item.orderNumber}
                     </td>
-                    <td className="px-3 py-2.5 font-bold tabular-nums">
+                    <td className="px-2 py-2 font-bold tabular-nums min-[1367px]:px-3 min-[1367px]:py-2.5">
                       {formatNumber(item.targetKg)} kg
                     </td>
-                    <td className="px-3 py-2.5 font-bold tabular-nums text-blue-700">
+                    <td className="hidden px-3 py-2.5 font-bold tabular-nums text-blue-700 min-[1367px]:table-cell">
                       {formatNumber(item.remainingKg)} kg
                     </td>
-                    <td className="px-3 py-2.5">
+                    <td className="hidden px-3 py-2.5 min-[1367px]:table-cell">
                       <strong className="tabular-nums text-slate-900">
                         {formatNumber(item.billetRequiredKg)} kg
                       </strong>
@@ -4639,37 +5035,38 @@ function Timeline({
                         % eficiência
                       </span>
                     </td>
-                    <td className="px-3 py-2.5">
+                    <td className="px-2 py-2 min-[1367px]:px-3 min-[1367px]:py-2.5">
                       <span
-                        className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[9px] font-bold ${item.thermalWaitMinutes > 0.5 ? "bg-red-100 text-red-700" : item.toolHeatingState === "released" ? "bg-emerald-50 text-emerald-700" : item.toolHeatingState === "heating" ? "bg-orange-50 text-orange-700" : "bg-amber-50 text-amber-700"}`}
+                        className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[9px] font-bold ${item.furnaceState === "released" ? "bg-emerald-50 text-emerald-700" : item.furnaceState === "ready_waiting" ? "bg-violet-50 text-violet-700" : item.furnaceState === "heating" ? "bg-orange-50 text-orange-700" : "bg-amber-50 text-amber-700"}`}
                       >
                         <Flame className="size-3" />
-                        {item.thermalWaitMinutes > 0.5
-                          ? `Espera ${formatDuration(item.thermalWaitMinutes)}`
-                          : item.toolHeatingState === "released"
+                        {item.furnaceState === "released"
                             ? "Liberada"
-                            : item.toolHeatingState === "heating"
-                              ? "Aquecendo"
-                              : "Simulada 4h"}
+                            : item.furnaceState === "ready_waiting"
+                                ? `Pronta aguardando · ${formatDuration(item.readyWaitingMinutes)}`
+                                : item.furnaceState === "heating"
+                                  ? `Aquecendo · pronta ${formatDateTime(item.calculatedToolReadyAt)}`
+                                  : "Aquecimento planejado"}
                       </span>
                       {item.ovenSlotNumber &&
                         item.toolHeatingState !== "released" && (
-                          <span className="mt-1 block text-[9px] text-slate-400">
-                            Vaga {item.ovenSlotNumber} · entrar até{" "}
-                            {formatDateTime(item.latestHeatingStartAt)}
+                          <span className="mt-1 block space-y-0.5 text-[9px] text-slate-400">
+                            <span className="block">{item.ovenCode ?? "Forno"} · posição {item.ovenPosition ?? item.ovenSlotNumber}</span>
+                            <span className="block">Entrada {formatDateTime(item.toolHeatingStartAt)} · pronta {formatDateTime(item.calculatedToolReadyAt)}</span>
+                            <span className="block">Retirada no início da extrusão: {formatDateTime(item.toolOvenExitAt)}</span>
                           </span>
                         )}
                     </td>
-                    <td className="px-3 py-2.5 tabular-nums">
+                    <td className="px-2 py-2 tabular-nums min-[1367px]:px-3 min-[1367px]:py-2.5">
                       {formatDateTime(item.extrusionStartAt)}
                     </td>
-                    <td className="px-3 py-2.5 font-bold tabular-nums">
+                    <td className="px-2 py-2 font-bold tabular-nums min-[1367px]:px-3 min-[1367px]:py-2.5">
                       {formatDuration(item.theoreticalMinutes)}
                     </td>
-                    <td className="px-3 py-2.5 tabular-nums">
+                    <td className="px-2 py-2 tabular-nums min-[1367px]:px-3 min-[1367px]:py-2.5">
                       {formatDateTime(item.endAt)}
                     </td>
-                    <td className="px-3 py-2.5">
+                    <td className="hidden px-3 py-2.5 min-[1367px]:table-cell">
                       <strong>
                         {formatNumber(item.productivityKgH, 0)} kg/h
                       </strong>
@@ -4677,13 +5074,13 @@ function Timeline({
                         {sourceLabel[item.productivitySource]}
                       </span>
                     </td>
-                    <td className="px-3 py-2.5">
+                    <td className="hidden px-3 py-2.5 min-[1367px]:table-cell">
                       <strong>{item.selectedAlloy}</strong>
                       <span className="block text-[10px] text-slate-400">
                         +{item.billetBarsLoaded} barra(s)
                       </span>
                     </td>
-                    <td className="px-3 py-2.5">
+                    <td className="hidden px-3 py-2.5 min-[1367px]:table-cell">
                       <ProjectedBalanceCell
                         balance={projectedBalances[item.id]}
                       />

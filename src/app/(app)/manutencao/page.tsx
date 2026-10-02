@@ -4,7 +4,7 @@ import { requirePermission } from "@/lib/local-auth/server";
 export default async function Page() {
   await requirePermission("maintenance");
   return (
-    <div className="space-y-6 p-6 lg:p-8">
+    <div className="space-y-5 p-4 lg:p-5 min-[1440px]:space-y-6 min-[1440px]:p-8">
       <div>
         <p className="text-xs font-bold uppercase tracking-[.18em] text-orange-600">
           Manutenção · Paradas

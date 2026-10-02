@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, BellRing, Boxes, ChartNoAxesCombined, ChevronLeft, ChevronRight, FileCog, Flame, Gauge, History, Import, Menu, PackageSearch, Settings, ShieldCheck, TimerReset, UnlockKeyhole, Wrench } from "lucide-react";
+import { BarChart3, BellRing, Boxes, ChartNoAxesCombined, ChevronLeft, ChevronRight, FileBarChart, FileCog, Flame, Gauge, History, Import, Menu, Settings, ShieldCheck, TimerReset, UnlockKeyhole, Wrench, NotebookTabs } from "lucide-react";
 import { BrandMark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -11,21 +11,34 @@ import { cn } from "@/lib/utils";
 import { useCurrentUser } from "@/components/current-user-provider";
 import { canAccess, type AccessArea } from "@/lib/access-control";
 
+const releaseVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "0.1.0";
+const releaseCommit = (process.env.NEXT_PUBLIC_APP_COMMIT ?? "local").slice(0, 7);
+const releaseEnvironment = process.env.NEXT_PUBLIC_APP_ENVIRONMENT ?? "local";
+const releaseBuildDate = process.env.NEXT_PUBLIC_APP_BUILD_DATE ?? "";
+
+function formatBuildDate(value: string) {
+  if (!value) return "data indisponível";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "data indisponível";
+  return new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeZone: "America/Sao_Paulo" }).format(date);
+}
+
 const navigationGroups = [
   { label: "Operação", items: [
     { label: "Visão geral", href: "/dashboard", icon: Gauge, permission: "dashboard" },
-    { label: "Produção", href: "/producao", icon: Boxes, permission: "production" },
-    { label: "Ordens e planos", href: "/ordens", icon: PackageSearch, permission: "orders" },
-    { label: "Importar simplificada", href: "/importar", icon: Import, permission: "import" },
-    { label: "Forno de ferramentas", href: "/forno", icon: Flame, permission: "oven" },
-    { label: "Carteira e planejamento", href: "/planejamento", icon: ChartNoAxesCombined, permission: "planning" },
     { label: "Carga Máquina", href: "/carga-maquina", icon: TimerReset, permission: "simulation" },
+    { label: "Forno de ferramentas", href: "/forno", icon: Flame, permission: "oven" },
+    { label: "Produção", href: "/producao", icon: Boxes, permission: "production" },
+    { label: "Report da Produção", href: "/diario-bordo", icon: NotebookTabs, permission: "diary" },
+    { label: "Carteira e planejamento", href: "/planejamento", icon: ChartNoAxesCombined, permission: "planning" },
   ] },
   { label: "Acompanhamento", items: [
+    { label: "Importar simplificada", href: "/importar", icon: Import, permission: "import" },
     { label: "Engenharia", href: "/engenharia", icon: FileCog, permission: "engineering" },
     { label: "Manutenção", href: "/manutencao", icon: Wrench, permission: "maintenance" },
     { label: "Qualidade", href: "/qualidade", icon: ShieldCheck, permission: "quality" },
     { label: "Indicadores", href: "/indicadores", icon: BarChart3, permission: "indicators" },
+    { label: "Relatórios", href: "/relatorios", icon: FileBarChart, permission: "reports" },
     { label: "Avisos operacionais", href: "/mensagens", icon: BellRing, permission: "messages" },
     { label: "Auditoria", href: "/configuracoes/auditoria", icon: History, permission: "audit" },
   ] },
@@ -76,8 +89,12 @@ function NavContent({ compact = false, onNavigate, onToggle }: { compact?: boole
             {compact ? <ChevronRight className="size-5" /> : <><ChevronLeft className="size-5" /><span>Recolher menu</span></>}
           </button>
         )}
-        <div title={compact ? "Acesso local · V1" : undefined} className={cn("flex h-9 items-center rounded-lg text-[11px] text-slate-600", compact ? "justify-center" : "gap-3 px-3")}>
-          <UnlockKeyhole className="size-[17px] shrink-0" />{!compact && <span>Acesso local · V1</span>}
+        <div
+          title={compact ? `TecnoMES ${releaseVersion} · ${releaseEnvironment} · build ${releaseCommit}` : undefined}
+          className={cn("flex min-h-9 items-center rounded-lg text-[10px] text-slate-500", compact ? "justify-center" : "gap-3 px-3")}
+        >
+          <UnlockKeyhole className="size-[17px] shrink-0" />
+          {!compact && <span className="min-w-0 leading-4"><strong className="block font-semibold text-slate-400">TecnoMES {releaseVersion} · {releaseEnvironment}</strong><span className="block truncate">Atualizado {formatBuildDate(releaseBuildDate)} · build {releaseCommit}</span></span>}
         </div>
       </div>
     </div>

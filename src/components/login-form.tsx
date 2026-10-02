@@ -19,9 +19,7 @@ export function LoginForm() {
     setLoading(false);
     if (!response.ok) { setError(result.error || "Não foi possível entrar."); return; }
     const next = search.get("next");
-    // O acesso sempre começa no Centro de operações. A troca de senha continua
-    // disponível no perfil, mas não deve tirar o usuário do fluxo operacional.
-    router.replace(next?.startsWith("/") ? next : "/dashboard");
+    router.replace(result.mustChangePassword ? "/perfil" : next?.startsWith("/") ? next : "/dashboard");
     router.refresh();
   }
 

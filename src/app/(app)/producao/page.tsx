@@ -3,5 +3,5 @@ import { requirePermission } from "@/lib/local-auth/server";
 
 export default async function Page() {
   await requirePermission("production");
-  return <div className="-m-4 md:-m-8"><ProductionCockpit /></div>;
+  return <div className="-m-4 lg:-m-5 min-[1440px]:-m-8"><ProductionCockpit /></div>;
 }

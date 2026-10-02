@@ -19,6 +19,7 @@
 
 # production
 /build
+/data/agent-workspace/
 
 # misc
 .DS_Store

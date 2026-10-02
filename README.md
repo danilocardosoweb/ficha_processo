@@ -51,7 +51,21 @@ O AluPilot envia um pacote compacto sem identificação de cliente, exige respos
 
 ## Vercel
 
-Importe o repositorio na Vercel e cadastre as duas variaveis do `.env.example`. A chave `service_role` nunca deve ser cadastrada como variavel `NEXT_PUBLIC_*`.
+No projeto da Vercel, cadastre em **Production** estas três variáveis obrigatórias:
+
+- `NEXT_PUBLIC_SUPABASE_URL`: a URL da mesma base em que as migrações foram aplicadas;
+- `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`: a chave publicável dessa base;
+- `NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID`: o UUID da organização inicial.
+
+Depois de alterar as variáveis, faça um novo deploy. O login local usa a RPC `public.local_login` e as tabelas privadas `private.local_users` e `private.local_sessions`; publicar o Next.js não aplica o schema do Supabase automaticamente. Antes do deploy, confirme no SQL Editor:
+
+```sql
+select to_regprocedure('public.local_login(text,text,text,text)') as login_function;
+select to_regprocedure('public.local_get_session(text)') as session_function;
+select count(*) as active_users from private.local_users where is_active = true;
+```
+
+As duas primeiras consultas precisam retornar a assinatura da função e a última precisa retornar pelo menos um usuário ativo. A chave `service_role` nunca deve ser cadastrada como variável `NEXT_PUBLIC_*`.
 
 ## Arquitetura
 

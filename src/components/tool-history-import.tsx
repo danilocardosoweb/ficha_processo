@@ -59,6 +59,8 @@ const number = (value: Cell) => {
   );
   return Number.isFinite(parsed) ? parsed : null;
 };
+const positive = (value: number | null) =>
+  value !== null && value > 0 ? value : null;
 const bool = (value: Cell) =>
   /^(sim|s|yes|true|1)$/i.test(
     text(value)
@@ -150,11 +152,13 @@ async function parseWorkbook(file: File) {
       const available =
         availability.get(normalize(sourceStatus)) ?? bool(value(row, "ativa"));
       const producedKg = number(value(row, "qteprod", "quantidadeproduzida"));
-      const packageMeasureMm = number(
-        value(row, "medidapacote", "medidapct", "pacote"),
+      // A planilha histórica usa zero/vazio quando a dimensão não foi informada.
+      // O banco representa essa ausência com NULL e só aceita dimensões positivas.
+      const packageMeasureMm = positive(
+        number(value(row, "medidapacote", "medidapct", "pacote")),
       );
-      const carcassDiameterMm = number(
-        value(row, "diametro", "diametrocarcaca"),
+      const carcassDiameterMm = positive(
+        number(value(row, "diametro", "diametrocarcaca")),
       );
       const carcassCode =
         packageMeasureMm && carcassDiameterMm
@@ -190,8 +194,8 @@ async function parseWorkbook(file: File) {
         supplier: text(value(row, "corretor")) || null,
         nitriding_life_kg: number(value(row, "vdnitret")),
         box: text(value(row, "box")) || null,
-        package_width_mm: number(value(row, "medidapacote")),
-        package_height_mm: number(value(row, "diametro")),
+        package_width_mm: packageMeasureMm,
+        package_height_mm: carcassDiameterMm,
         package_measure_mm: packageMeasureMm,
         carcass_diameter_mm: carcassDiameterMm,
         carcass_code: carcassCode,
@@ -281,9 +285,10 @@ export function ToolHistoryImport({ onImported }: { onImported: () => void }) {
     setProgress(0);
     try {
       const supabase = createClient();
+      const uniqueRows = [...new Map(rows.map((row) => [row.code, row])).values()];
       const chunkSize = 200;
-      for (let start = 0; start < rows.length; start += chunkSize) {
-        const chunk = rows
+      for (let start = 0; start < uniqueRows.length; start += chunkSize) {
+        const chunk = uniqueRows
           .slice(start, start + chunkSize)
           .map((row) => row.payload);
         const { error: importError } = await supabase
@@ -292,18 +297,15 @@ export function ToolHistoryImport({ onImported }: { onImported: () => void }) {
         if (importError) throw importError;
         setProgress(
           Math.round(
-            (Math.min(rows.length, start + chunkSize) / rows.length) * 100,
+            (Math.min(uniqueRows.length, start + chunkSize) / uniqueRows.length) * 100,
           ),
         );
       }
       setDone(true);
       onImported();
     } catch (cause) {
-      setError(
-        cause instanceof Error
-          ? cause.message
-          : "Não foi possível importar o histórico.",
-      );
+      const detail = cause && typeof cause === "object" && "message" in cause ? String((cause as { message?: unknown }).message) : cause instanceof Error ? cause.message : "";
+      setError(`Não foi possível importar o histórico.${detail ? ` ${detail}` : ""}`);
     } finally {
       setImporting(false);
     }

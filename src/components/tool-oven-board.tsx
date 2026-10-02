@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   ArrowRightLeft,
@@ -50,6 +50,7 @@ type HeatingCycle = {
   notes: string | null; release_notes: string | null; tool_heating_cycle_orders: CycleOrderLink[];
 };
 type ToolGroup = { key: string; tool: string; machine: string; importId: string | null; orders: HeatingOrder[] };
+type CrossPressToolConflict = { tool: string; machines: string[]; orders: HeatingOrder[]; plans: string[]; orderNumbers: string[] };
 type ToolOven = {
   id: string; machine_code: string; code: string; name: string; position_count: number;
   solid_minimum_minutes: number; tubular_minimum_minutes: number;
@@ -59,6 +60,9 @@ type ToolOven = {
 
 const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
 const orderFields = "id,import_batch_id,order_number,plan_code,machine_code,tool_code,customer_name,target_kg,target_quantity,demand_unit,status,is_active,due_date,source_data";
+// O quadro só precisa destes campos para ciclos já aquecidos. Não repita o DTO
+// completo da ordem dentro de cada ciclo: isso multiplicava o payload por ciclo.
+const cycleOrderFields = "id,plan_code,status,is_active";
 const WAITING_PAGE_SIZE = 5;
 const HEATING_PAGE_SIZE = 2;
 const RELEASED_PAGE_SIZE = 5;
@@ -107,9 +111,27 @@ function inferredToolType(orders: HeatingOrder[]): "solid" | "tubular" {
     ? "tubular"
     : "solid";
 }
+function crossPressToolConflicts(orders: HeatingOrder[]): CrossPressToolConflict[] {
+  const byTool = new Map<string, HeatingOrder[]>();
+  for (const order of orders) {
+    const tool = order.tool_code.trim().toUpperCase();
+    if (!tool) continue;
+    byTool.set(tool, [...(byTool.get(tool) ?? []), order]);
+  }
+  return [...byTool.entries()].flatMap(([tool, toolOrders]) => {
+    const machines = [...new Set(toolOrders.map((order) => order.machine_code))].sort();
+    return machines.length < 2 ? [] : [{
+      tool,
+      machines,
+      orders: toolOrders,
+      plans: [...new Set(toolOrders.map((order) => order.plan_code).filter((plan): plan is string => Boolean(plan)))],
+      orderNumbers: toolOrders.map((order) => order.order_number),
+    }];
+  }).sort((left, right) => left.tool.localeCompare(right.tool));
+}
 
 export function ToolOvenBoard() {
-  const { display_name: operatorName, role, machine_codes: userMachineCodes } = useCurrentUser();
+  const { user_id: userId, display_name: operatorName, role, machine_codes: userMachineCodes } = useCurrentUser();
   const canPlan = role === "admin" || role === "pcp";
   const allowedMachines = useMemo(() => canPlan || !userMachineCodes?.length ? null : new Set(userMachineCodes), [canPlan, userMachineCodes]);
   const [orders, setOrders] = useState<HeatingOrder[]>([]);
@@ -117,6 +139,7 @@ export function ToolOvenBoard() {
   const [ovens, setOvens] = useState<ToolOven[]>([]);
   const [query, setQuery] = useState("");
   const [machineFilter, setMachineFilter] = useState("");
+  const [machineFilterReady, setMachineFilterReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -130,28 +153,67 @@ export function ToolOvenBoard() {
   const [dialogProblem, setDialogProblem] = useState("");
   const [releaseCycle, setReleaseCycle] = useState<HeatingCycle | null>(null);
   const [releaseReason, setReleaseReason] = useState("");
+  const [releaseHelpOpen, setReleaseHelpOpen] = useState(false);
   const [cancelCycle, setCancelCycle] = useState<HeatingCycle | null>(null);
   const [cancelReason, setCancelReason] = useState("");
+  const [limitCycle, setLimitCycle] = useState<HeatingCycle | null>(null);
+  const [limitAction, setLimitAction] = useState<"release_at_risk" | "cool_and_polish">("cool_and_polish");
+  const [limitReason, setLimitReason] = useState("");
   const [relocateCycle, setRelocateCycle] = useState<HeatingCycle | null>(null);
   const [relocateMachine, setRelocateMachine] = useState("");
   const [relocateOvenId, setRelocateOvenId] = useState("");
   const [relocatePosition, setRelocatePosition] = useState("");
   const [relocateReason, setRelocateReason] = useState("");
-  const [waitingPage, setWaitingPage] = useState(1);
+  const [waitingPagesByMachine, setWaitingPagesByMachine] = useState({ "18": 1, "19": 1 });
   const [heatingPage, setHeatingPage] = useState(1);
   const [releasedPage, setReleasedPage] = useState(1);
   const [visibleStages, setVisibleStages] = useState({ waiting: true, heating: true, released: true });
   const [collapsedStages, setCollapsedStages] = useState({ waiting: false, heating: false, released: false });
   const [boardView, setBoardView] = useState<"cards" | "map">("cards");
+  const loadingRef = useRef(false);
+  const seenConflictSignature = useRef("");
+  const [conflictDialogOpen, setConflictDialogOpen] = useState(false);
+  const machineFilterStorageKey = `tecnomes:tool-oven-board:machine-filter:${userId}`;
+
+  useEffect(() => {
+    let active = true;
+    let savedFilter: string | null = null;
+    try {
+      savedFilter = window.localStorage.getItem(machineFilterStorageKey);
+    } catch {
+      // A private browsing policy may block localStorage; keep the default filter.
+    }
+    queueMicrotask(() => {
+      if (!active) return;
+      if (savedFilter === "18" || savedFilter === "19") {
+        if (!allowedMachines || allowedMachines.has(savedFilter)) setMachineFilter(savedFilter);
+      }
+      setMachineFilterReady(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, [allowedMachines, machineFilterStorageKey]);
+
+  useEffect(() => {
+    if (!machineFilterReady) return;
+    try {
+      window.localStorage.setItem(machineFilterStorageKey, machineFilter);
+    } catch {
+      // Keep the filter available for the current session when persistence is unavailable.
+    }
+  }, [machineFilter, machineFilterReady, machineFilterStorageKey]);
 
   const load = useCallback(async (silent = false) => {
     if (!organizationId) return;
+    if (loadingRef.current) return;
+    loadingRef.current = true;
     if (!silent) setLoading(true);
     try {
       const supabase = createClient();
       const [{ data: orderData, error: orderError }, { data: cycleData, error: cycleError }, { data: ovenData, error: ovenError }] = await Promise.all([
         supabase.from("production_orders").select(`${orderFields},simplified_imports!inner(id,is_active,status,deleted_at)`).eq("organization_id", organizationId).eq("is_active", true).in("status", ["planned", "released", "paused"]).eq("simplified_imports.is_active", true).eq("simplified_imports.status", "processed").is("simplified_imports.deleted_at", null).order("sequence").limit(1000),
-        supabase.from("tool_heating_cycles").select(`id,import_batch_id,machine_code,tool_code,oven_code,oven_id,oven_position,tool_type,target_temperature_c,maximum_due_at,status,required_minutes,entered_at,expected_ready_at,released_at,entered_by_name,released_by_name,released_early,actual_heating_minutes,notes,release_notes,tool_heating_cycle_orders(production_order_id,production_orders(${orderFields}))`).eq("organization_id", organizationId).in("status", ["heating", "released"]).order("entered_at", { ascending: false }).limit(200),
+        supabase.from("tool_heating_cycles").select(`id,import_batch_id,machine_code,tool_code,oven_code,oven_id,oven_position,tool_type,target_temperature_c,maximum_due_at,status,required_minutes,entered_at,expected_ready_at,released_at,entered_by_name,released_by_name,released_early,actual_heating_minutes,notes,release_notes,tool_heating_cycle_orders(production_order_id,production_orders(${cycleOrderFields}))`).eq("organization_id", organizationId).in("status", ["heating", "released"]).order("entered_at", { ascending: false }).limit(200),
         supabase.from("tool_ovens").select("id,machine_code,code,name,position_count,solid_minimum_minutes,tubular_minimum_minutes,maximum_minutes,solid_target_temperature_c,tubular_target_temperature_c,is_active").eq("organization_id", organizationId).eq("is_active", true).order("machine_code").order("code"),
       ]);
       if (orderError) throw orderError;
@@ -162,12 +224,17 @@ export function ToolOvenBoard() {
       setOvens((ovenData ?? []) as ToolOven[]);
       setMessage("");
     } catch (error) { setMessage(errorMessage(error)); }
-    finally { if (!silent) setLoading(false); }
+    finally { loadingRef.current = false; if (!silent) setLoading(false); }
   }, [setMessage]);
 
   useEffect(() => { const initialLoad = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(initialLoad); }, [load]);
   useEffect(() => { const tick = () => setNow(Date.now()); const initialTick = window.setTimeout(tick, 0); const timer = window.setInterval(tick, 1000); return () => { window.clearTimeout(initialTick); window.clearInterval(timer); }; }, []);
-  useEffect(() => { const timer = window.setInterval(() => void load(true), 15000); return () => window.clearInterval(timer); }, [load]);
+  useEffect(() => {
+    const refreshIfVisible = () => { if (document.visibilityState === "visible") void load(true); };
+    const timer = window.setInterval(refreshIfVisible, 60_000);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", refreshIfVisible); };
+  }, [load]);
 
   const linkedOrderIds = useMemo(() => new Set(cycles.flatMap((cycle) => cycle.tool_heating_cycle_orders.map((link) => link.production_order_id))), [cycles]);
   const effectiveMachineFilter = machineFilter && (!allowedMachines || allowedMachines.has(machineFilter)) ? machineFilter : "";
@@ -186,6 +253,14 @@ export function ToolOvenBoard() {
       (!normalized || `${group.tool} ${group.machine} ${group.orders.map((order) => `${order.plan_code} ${order.customer_name}`).join(" ")}`.toUpperCase().includes(normalized))
     );
   }, [orders, linkedOrderIds, query, effectiveMachineFilter, allowedMachines]);
+  const crossPressConflicts = useMemo(() => crossPressToolConflicts(orders), [orders]);
+  const conflictSignature = crossPressConflicts.map((conflict) => `${conflict.tool}:${conflict.machines.join(",")}:${conflict.orderNumbers.join(",")}`).join("|");
+  const conflictedTools = useMemo(() => new Set(crossPressConflicts.map((conflict) => conflict.tool)), [crossPressConflicts]);
+  useEffect(() => {
+    if (!conflictSignature || seenConflictSignature.current === conflictSignature) return;
+    seenConflictSignature.current = conflictSignature;
+    setConflictDialogOpen(true);
+  }, [conflictSignature]);
   const heatingAll = cycles.filter((cycle) => cycle.status === "heating");
   const heating = heatingAll.filter((cycle) => (!effectiveMachineFilter || cycle.machine_code === effectiveMachineFilter) && (!allowedMachines || allowedMachines.has(cycle.machine_code)));
   const released = cycles.filter((cycle) => (!effectiveMachineFilter || cycle.machine_code === effectiveMachineFilter) && (!allowedMachines || allowedMachines.has(cycle.machine_code)) && cycle.status === "released" && cycle.tool_heating_cycle_orders.some((link) => link.production_orders?.is_active && ["planned", "released", "paused"].includes(link.production_orders.status)));
@@ -199,16 +274,28 @@ export function ToolOvenBoard() {
   const relocateOvens = ovens.filter((oven) => oven.machine_code === relocateMachine && (!allowedMachines || allowedMachines.has(oven.machine_code)));
   const relocateOccupiedMap = new Map(heatingAll.filter((cycle) => cycle.oven_id === relocateOvenId && cycle.id !== relocateCycle?.id).map((cycle) => [cycle.oven_position, cycle]));
   const relocatePositions = relocateOven ? Array.from({ length: relocateOven.position_count }, (_, index) => index + 1) : [];
-  const waitingPages = Math.max(1, Math.ceil(available.length / WAITING_PAGE_SIZE));
+  const availableByMachine = useMemo(() => ({
+    "18": available.filter((group) => group.machine === "18"),
+    "19": available.filter((group) => group.machine === "19"),
+  }), [available]);
+  const waitingPages18 = Math.max(1, Math.ceil(availableByMachine["18"].length / WAITING_PAGE_SIZE));
+  const waitingPages19 = Math.max(1, Math.ceil(availableByMachine["19"].length / WAITING_PAGE_SIZE));
   const heatingPages = Math.max(1, Math.ceil(heating.length / HEATING_PAGE_SIZE));
   const releasedPages = Math.max(1, Math.ceil(released.length / RELEASED_PAGE_SIZE));
-  const visibleAvailable = available.slice((Math.min(waitingPage, waitingPages) - 1) * WAITING_PAGE_SIZE, Math.min(waitingPage, waitingPages) * WAITING_PAGE_SIZE);
+  const visibleAvailable18 = availableByMachine["18"].slice((Math.min(waitingPagesByMachine["18"], waitingPages18) - 1) * WAITING_PAGE_SIZE, Math.min(waitingPagesByMachine["18"], waitingPages18) * WAITING_PAGE_SIZE);
+  const visibleAvailable19 = availableByMachine["19"].slice((Math.min(waitingPagesByMachine["19"], waitingPages19) - 1) * WAITING_PAGE_SIZE, Math.min(waitingPagesByMachine["19"], waitingPages19) * WAITING_PAGE_SIZE);
   const visibleHeating = heating.slice((Math.min(heatingPage, heatingPages) - 1) * HEATING_PAGE_SIZE, Math.min(heatingPage, heatingPages) * HEATING_PAGE_SIZE);
   const visibleReleased = released.slice((Math.min(releasedPage, releasedPages) - 1) * RELEASED_PAGE_SIZE, Math.min(releasedPage, releasedPages) * RELEASED_PAGE_SIZE);
   const visibleStageCount = boardView === "map"
     ? Number(visibleStages.waiting) + Number(visibleStages.heating || visibleStages.released)
     : Object.values(visibleStages).filter(Boolean).length;
-  const boardGridClass = visibleStageCount === 1 ? "xl:grid-cols-1" : visibleStageCount === 2 ? "xl:grid-cols-2" : "xl:grid-cols-3";
+  // Monitores industriais comuns podem ter uma viewport CSS menor que a resolução física.
+  // Mantemos as etapas lado a lado a partir de 1200px para evitar cartões excessivamente largos.
+  const boardGridClass = visibleStageCount === 1
+    ? "min-[1200px]:grid-cols-1"
+    : visibleStageCount === 2
+      ? "min-[1200px]:grid-cols-2"
+      : "min-[1200px]:grid-cols-2 min-[1650px]:grid-cols-3";
   function toggleStage(stage: keyof typeof visibleStages) {
     setVisibleStages((current) => {
       const next = { ...current, [stage]: !current[stage] };
@@ -244,6 +331,19 @@ export function ToolOvenBoard() {
       const tool = releaseCycle.tool_code;
       setReleaseCycle(null); setReleaseReason(""); setDialogProblem("");
       setMessage(early ? `${tool} liberada antecipadamente. A justificativa foi registrada.` : `${tool} liberada para abrir a ficha e produzir.`);
+      requestOfflineSync("tool_heating_cycles"); await load();
+    } catch (error) { setDialogProblem(errorMessage(error)); setReleaseHelpOpen(true); }
+    finally { setSaving(false); }
+  }
+  async function resolveLimit() {
+    if (!limitCycle || limitReason.trim().length < 8) { setDialogProblem("Informe uma justificativa com pelo menos 8 caracteres."); return; }
+    setSaving(true);
+    try {
+      const { error } = await createClient().rpc("resolve_tool_heating_limit", { p_cycle_id: limitCycle.id, p_actor: operatorName, p_action: limitAction, p_reason: limitReason.trim() });
+      if (error) throw error;
+      const tool = limitCycle.tool_code;
+      setLimitCycle(null); setLimitReason(""); setDialogProblem("");
+      setMessage(limitAction === "release_at_risk" ? `${tool} foi liberada sob risco. A decisão ficará registrada para acompanhamento de acabamento.` : `${tool} foi retirada para resfriar e polir. Ela retornou à fila para novo aquecimento.`);
       requestOfflineSync("tool_heating_cycles"); await load();
     } catch (error) { setDialogProblem(errorMessage(error)); }
     finally { setSaving(false); }
@@ -289,9 +389,10 @@ export function ToolOvenBoard() {
     <div className="space-y-3 md:-my-4">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div><div className="flex items-center gap-2"><p className="text-[10px] font-bold uppercase tracking-[.2em] text-orange-600">Produção · preparação</p><span className="hidden items-center text-xs text-slate-400 sm:inline-flex">Simplificada <ChevronRight className="size-3.5" /> aquecimento <ChevronRight className="size-3.5" /> produção</span></div><h1 className="mt-0.5 font-heading text-2xl font-bold text-slate-950">Forno de ferramentas</h1></div>
-        <div className="flex items-center gap-2"><select value={effectiveMachineFilter} onChange={(event) => { setMachineFilter(event.target.value); setWaitingPage(1); setHeatingPage(1); setReleasedPage(1); }} className="h-9 rounded-lg border bg-white px-3 text-sm font-semibold"><option value="">{allowedMachines ? "Minhas prensas" : "Todas as prensas"}</option>{["18", "19"].filter((code) => !allowedMachines || allowedMachines.has(code)).map((code) => <option key={code} value={code}>{machineLabel(code)}</option>)}</select><button type="button" onClick={() => void load()} disabled={loading} className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border bg-white px-2.5 text-sm font-medium transition hover:bg-slate-100 disabled:pointer-events-none disabled:opacity-50"><RefreshCw className={cn("size-4", loading && "animate-spin")} />Atualizar</button></div>
+        <div className="flex items-center gap-2"><select value={effectiveMachineFilter} onChange={(event) => { setMachineFilter(event.target.value); setWaitingPagesByMachine({ "18": 1, "19": 1 }); setHeatingPage(1); setReleasedPage(1); }} className="h-9 rounded-lg border bg-white px-3 text-sm font-semibold"><option value="">{allowedMachines ? "Minhas prensas" : "Todas as prensas"}</option>{["18", "19"].filter((code) => !allowedMachines || allowedMachines.has(code)).map((code) => <option key={code} value={code}>{machineLabel(code)}</option>)}</select><button type="button" onClick={() => void load()} disabled={loading} className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border bg-white px-2.5 text-sm font-medium transition hover:bg-slate-100 disabled:pointer-events-none disabled:opacity-50"><RefreshCw className={cn("size-4", loading && "animate-spin")} />Atualizar</button></div>
       </header>
       {message && <div className={cn("rounded-lg border px-3 py-2 text-sm", /não|falha|erro|ainda/i.test(message) ? "border-red-200 bg-red-50 text-red-700" : "border-emerald-200 bg-emerald-50 text-emerald-800")}>{message}</div>}
+      {crossPressConflicts.length > 0 && <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-950"><span><strong>Programação para conferir:</strong> {crossPressConflicts.length} ferramenta(s) estão nas duas prensas.</span><Button variant="outline" size="sm" className="border-red-200 bg-white" onClick={() => setConflictDialogOpen(true)}><ShieldAlert />Revisar conflito</Button></div>}
 
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-white px-3 py-2 shadow-sm">
         <div className="flex flex-wrap items-center gap-2">
@@ -302,20 +403,32 @@ export function ToolOvenBoard() {
             <StageToggle active={visibleStages.released} tone="green" onClick={() => toggleStage("released")}>Liberadas <span>{released.length}</span></StageToggle>
           </div>
         </div>
+        <Button
+          render={<Link href="/forno-operacional" />}
+          variant="outline"
+          size="sm"
+          className="ml-auto gap-1.5 border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-100"
+          title="Abrir o novo painel operacional dos fornos"
+        >
+          <Flame className="size-3.5" />
+          Novo modo de forno
+        </Button>
         <div className="flex items-center rounded-lg bg-slate-100 p-0.5">
           <button type="button" onClick={() => setBoardView("cards")} className={cn("inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-bold transition", boardView === "cards" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-800")}><List className="size-3.5" />Cards</button>
-          <button type="button" onClick={() => setBoardView("map")} className={cn("inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-bold transition", boardView === "map" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-800")}><LayoutGrid className="size-3.5" />Mapa do forno</button>
+          <button type="button" onClick={() => { setBoardView("map"); setCollapsedStages((current) => ({ ...current, waiting: true })); }} className={cn("inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-bold transition", boardView === "map" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-800")}><LayoutGrid className="size-3.5" />Mapa do forno</button>
         </div>
       </div>
 
       <div className={cn("grid min-w-0 gap-3", boardGridClass)}>
-        {visibleStages.waiting && <BoardColumn title="1. Aguardando" subtitle="Simplificadas ativas" icon={<PackageSearch className="size-4" />} value={available.length} detail="para o forno" collapsed={collapsedStages.waiting} onToggle={() => setCollapsedStages((current) => ({ ...current, waiting: !current.waiting }))}>
-          <div className="relative mb-2"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><Input value={query} onChange={(event) => { setQuery(event.target.value); setWaitingPage(1); }} placeholder="Ferramenta, Plano ou cliente" className="h-9 pl-9" /></div>
-          {loading ? <Loading /> : available.length ? visibleAvailable.map((group) => <AvailableCard key={group.key} group={group} onChoose={() => { setSelected(group); setToolType(inferredToolType(group.orders)); setTargetMachine(group.machine); setOvenId(""); setOvenPosition(""); setMessage(""); setDialogProblem(""); }} />) : <Empty text="Nenhuma ferramenta aguardando forno." />}
-          <Pager page={Math.min(waitingPage, waitingPages)} pages={waitingPages} onChange={setWaitingPage} />
+        {visibleStages.waiting && <BoardColumn title="1. Aguardando" subtitle="Filas separadas por prensa" icon={<PackageSearch className="size-4" />} value={available.length} detail="para o forno" collapsed={collapsedStages.waiting} onToggle={() => setCollapsedStages((current) => ({ ...current, waiting: !current.waiting }))}>
+          <div className="relative mb-2"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><Input value={query} onChange={(event) => { setQuery(event.target.value); setWaitingPagesByMachine({ "18": 1, "19": 1 }); }} placeholder="Ferramenta, Plano ou cliente" className="h-9 pl-9" /></div>
+          {loading ? <Loading /> : <div className={cn("grid gap-3", !effectiveMachineFilter && "min-[1100px]:grid-cols-2")}>
+            {(!effectiveMachineFilter || effectiveMachineFilter === "18") && <WaitingQueue machineCode="18" groups={visibleAvailable18} total={availableByMachine["18"].length} page={Math.min(waitingPagesByMachine["18"], waitingPages18)} pages={waitingPages18} onPageChange={(page) => setWaitingPagesByMachine((current) => ({ ...current, "18": page }))} conflictedTools={conflictedTools} onChoose={(group) => { setSelected(group); setToolType(inferredToolType(group.orders)); setTargetMachine(group.machine); setOvenId(""); setOvenPosition(""); setMessage(""); setDialogProblem(""); }} />}
+            {(!effectiveMachineFilter || effectiveMachineFilter === "19") && <WaitingQueue machineCode="19" groups={visibleAvailable19} total={availableByMachine["19"].length} page={Math.min(waitingPagesByMachine["19"], waitingPages19)} pages={waitingPages19} onPageChange={(page) => setWaitingPagesByMachine((current) => ({ ...current, "19": page }))} conflictedTools={conflictedTools} onChoose={(group) => { setSelected(group); setToolType(inferredToolType(group.orders)); setTargetMachine(group.machine); setOvenId(""); setOvenPosition(""); setMessage(""); setDialogProblem(""); }} />}
+          </div>}
         </BoardColumn>}
         {boardView === "cards" && visibleStages.heating && <BoardColumn title="2. Aquecendo" subtitle="Contagem em tempo real" icon={<Flame className="size-4 text-orange-600" />} value={heating.length} detail={`${Math.max(0, visibleCapacity - heating.length)} vagas livres`} tone="orange" collapsed={collapsedStages.heating} onToggle={() => setCollapsedStages((current) => ({ ...current, heating: !current.heating }))}>
-          {heating.length ? visibleHeating.map((cycle) => <HeatingCard key={cycle.id} cycle={cycle} now={now} saving={saving} onRelease={() => { setReleaseCycle(cycle); setReleaseReason(""); setDialogProblem(""); }} onCancel={() => { setCancelCycle(cycle); setCancelReason(""); }} onRelocate={() => openRelocate(cycle)} />) : <Empty text="Nenhuma ferramenta no forno." />}
+          {heating.length ? visibleHeating.map((cycle) => <HeatingCard key={cycle.id} cycle={cycle} now={now} saving={saving} onRelease={() => { setReleaseCycle(cycle); setReleaseReason(""); setDialogProblem(""); }} onCancel={() => { setCancelCycle(cycle); setCancelReason(""); }} onLimit={() => { setLimitCycle(cycle); setLimitAction("cool_and_polish"); setLimitReason(""); setDialogProblem(""); }} onRelocate={() => openRelocate(cycle)} />) : <Empty text="Nenhuma ferramenta no forno." />}
           <Pager page={Math.min(heatingPage, heatingPages)} pages={heatingPages} onChange={setHeatingPage} />
         </BoardColumn>}
         {boardView === "cards" && visibleStages.released && <BoardColumn title="3. Liberadas" subtitle="Prontas para produzir" icon={<CheckCircle2 className="size-4 text-emerald-600" />} value={released.length} detail="aguardando produção" tone="green" collapsed={collapsedStages.released} onToggle={() => setCollapsedStages((current) => ({ ...current, released: !current.released }))}>
@@ -323,7 +436,14 @@ export function ToolOvenBoard() {
           <Pager page={Math.min(releasedPage, releasedPages)} pages={releasedPages} onChange={setReleasedPage} />
         </BoardColumn>}
       </div>
-      {boardView === "map" && (visibleStages.heating || visibleStages.released) && <OvenMap ovens={visibleOvens} heating={visibleStages.heating ? heating : []} released={visibleStages.released ? released : []} now={now} onRelease={(cycle) => { setReleaseCycle(cycle); setReleaseReason(""); setDialogProblem(""); }} onRelocate={openRelocate} />}
+      {boardView === "map" && (visibleStages.heating || visibleStages.released) && <OvenMap ovens={visibleOvens} heating={visibleStages.heating ? heating : []} released={visibleStages.released ? released : []} now={now} onRelease={(cycle) => { setReleaseCycle(cycle); setReleaseReason(""); setDialogProblem(""); }} onLimit={(cycle) => { setLimitCycle(cycle); setLimitAction("cool_and_polish"); setLimitReason(""); setDialogProblem(""); }} onRelocate={openRelocate} />}
+
+      <Dialog open={conflictDialogOpen} onOpenChange={setConflictDialogOpen}>
+        <DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>Conferir ferramenta programada nas duas prensas</DialogTitle><DialogDescription>O sistema encontrou a mesma ferramenta em Simplificadas ativas da Prensa 1.8 e da Prensa 1.9. Uma ferramenta não deve seguir para o forno enquanto essa divergência não for revisada pelo PCP.</DialogDescription></DialogHeader>
+          <div className="space-y-3"><div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-950"><strong>O que fazer:</strong> retire a programação duplicada, reúna os pedidos da mesma ferramenta em uma única prensa e gere novamente a otimização. Nenhuma programação foi apagada automaticamente.</div>{crossPressConflicts.map((conflict) => <article className="rounded-xl border border-slate-200 p-3" key={conflict.tool}><div className="flex flex-wrap items-center justify-between gap-2"><strong className="font-mono text-orange-600">{conflict.tool}</strong><span className="rounded-full bg-red-100 px-2 py-1 text-xs font-bold text-red-800">Programada em {conflict.machines.map(machineLabel).join(" e ")}</span></div><p className="mt-2 text-sm text-slate-700">Planos: {conflict.plans.join(", ") || "não informados"} · OPs: {conflict.orderNumbers.join(", ")}</p></article>)}</div>
+          <DialogFooter><Button variant="outline" onClick={() => setConflictDialogOpen(false)}>Entendi, vou corrigir</Button><Button render={<Link href="/carga-maquina" />}>Abrir Carga Máquina</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={!!selected} onOpenChange={(open) => !open && setSelected(null)}>
         <DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>Entrada da ferramenta no forno</DialogTitle><DialogDescription>{selected?.tool} · Prensa {machineLabel(selected?.machine || "")} · {selected?.orders.length || 0} item(ns) vinculados</DialogDescription></DialogHeader>
@@ -343,10 +463,18 @@ export function ToolOvenBoard() {
 
       <Dialog open={!!releaseCycle} onOpenChange={(open) => { if (!open) { setReleaseCycle(null); setReleaseReason(""); setDialogProblem(""); } }}>
         <DialogContent className="sm:max-w-md"><DialogHeader><DialogTitle>{releaseCycle && now < new Date(releaseCycle.expected_ready_at).getTime() ? "Liberar antes do tempo mínimo?" : "Liberar ferramenta para produção"}</DialogTitle><DialogDescription>{releaseCycle?.tool_code} · Prensa {machineLabel(releaseCycle?.machine_code || "")} · {releaseCycle?.oven_code} / posição {releaseCycle?.oven_position}</DialogDescription></DialogHeader>
-          {releaseCycle && now < new Date(releaseCycle.expected_ready_at).getTime() ? <div className="space-y-3"><div className="flex gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"><ShieldAlert className="mt-0.5 size-5 shrink-0 text-amber-600" /><div><p className="font-bold">A ferramenta ainda não completou as 4 horas.</p><p className="mt-1 text-xs">Faltam {duration(new Date(releaseCycle.expected_ready_at).getTime() - now)}. A retirada antecipada pode afetar a estabilidade do processo e ficará registrada na auditoria.</p></div></div><label className="block text-sm font-semibold">Justificativa obrigatória<textarea value={releaseReason} onChange={(event) => { setReleaseReason(event.target.value); setDialogProblem(""); }} rows={3} placeholder="Ex.: retirada para liberar a vaga e atender produção prioritária" className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-orange-500" autoFocus /><span className="mt-1 block text-xs font-normal text-slate-500">Responsável: {operatorName} · o horário e o tempo aquecido serão salvos automaticamente.</span></label></div> : <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900"><p className="font-bold">Tempo mínimo atingido.</p><p className="mt-1 text-xs">Ao confirmar, a vaga será liberada e a ferramenta ficará disponível para iniciar a produção.</p></div>}
+          {releaseCycle && now < new Date(releaseCycle.expected_ready_at).getTime() ? <div className="space-y-3"><div className="flex gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"><ShieldAlert className="mt-0.5 size-5 shrink-0 text-amber-600" /><div><p className="font-bold">A ferramenta ainda não completou as 4 horas.</p><p className="mt-1 text-xs">Faltam {duration(new Date(releaseCycle.expected_ready_at).getTime() - now)}. A retirada antecipada pode afetar a estabilidade do processo e ficará registrada na auditoria.</p></div></div><label className="block text-sm font-semibold">Justificativa obrigatória<textarea value={releaseReason} onChange={(event) => { setReleaseReason(event.target.value); setDialogProblem(""); }} rows={3} placeholder="Ex.: retirada para liberar a vaga e atender produção prioritária" className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-orange-500" autoFocus /><span className="mt-1 block text-xs font-normal text-slate-500">{releaseReason.trim().length < 8 ? `Faltam ${8 - releaseReason.trim().length} caractere(s) para confirmar.` : "Justificativa válida."} Responsável: {operatorName}.</span></label><button type="button" className="text-left text-xs font-bold text-orange-700 underline underline-offset-2" onClick={() => setReleaseHelpOpen(true)}>Por que não consigo confirmar?</button></div> : <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900"><p className="font-bold">Tempo mínimo atingido.</p><p className="mt-1 text-xs">Ao confirmar, a vaga será liberada e a ferramenta ficará disponível para iniciar a produção.</p></div>}
           {dialogProblem && <p className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">{dialogProblem}</p>}
           <DialogFooter><Button variant="outline" onClick={() => setReleaseCycle(null)}>Voltar</Button><Button onClick={() => void release()} disabled={saving || (!!releaseCycle && now < new Date(releaseCycle.expected_ready_at).getTime() && releaseReason.trim().length < 8)}><CheckCircle2 />{saving ? "Liberando..." : releaseCycle && now < new Date(releaseCycle.expected_ready_at).getTime() ? "Confirmar antecipação" : "Liberar para produção"}</Button></DialogFooter>
         </DialogContent>
+      </Dialog>
+
+      <Dialog open={releaseHelpOpen} onOpenChange={setReleaseHelpOpen}>
+        <DialogContent className="sm:max-w-md"><DialogHeader><DialogTitle>O que impede a antecipação?</DialogTitle><DialogDescription>Confira os requisitos antes de liberar a ferramenta.</DialogDescription></DialogHeader><div className="space-y-3 text-sm text-slate-700"><div className="rounded-xl border p-3"><strong>Justificativa</strong><p className="mt-1 text-xs">{releaseReason.trim().length < 8 ? `Faltam ${8 - releaseReason.trim().length} caractere(s). É necessário informar pelo menos 8.` : "A justificativa está preenchida."}</p></div><div className="rounded-xl border p-3"><strong>Produção em andamento</strong><p className="mt-1 text-xs">{releaseCycle?.tool_heating_cycle_orders.some((link) => link.production_orders?.status === "in_progress") ? "Há uma ordem vinculada já em produção. Confira a situação física: esta ferramenta não deve iniciar uma nova produção enquanto a anterior estiver aberta." : "Não há ordem vinculada em produção nesta consulta."}</p></div>{dialogProblem && <div className="rounded-xl border border-red-200 bg-red-50 p-3"><strong>Retorno do sistema</strong><p className="mt-1 text-xs">{dialogProblem}</p></div>}<p className="text-xs text-slate-500">A antecipação só libera a ferramenta; ela não inicia produção automaticamente.</p></div><DialogFooter><Button onClick={() => setReleaseHelpOpen(false)}>Entendi</Button></DialogFooter></DialogContent>
+      </Dialog>
+
+      <Dialog open={!!limitCycle} onOpenChange={(open) => { if (!open) { setLimitCycle(null); setLimitReason(""); setDialogProblem(""); } }}>
+        <DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>Limite de forno excedido</DialogTitle><DialogDescription>{limitCycle?.tool_code} · Prensa {machineLabel(limitCycle?.machine_code || "")} · {limitCycle?.oven_code} / posição {limitCycle?.oven_position}</DialogDescription></DialogHeader><div className="space-y-4"><div className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-950"><p className="font-bold">A ferramenta ultrapassou o tempo máximo no forno.</p><p className="mt-1 text-xs">Escolha o destino físico da ferramenta. Nenhuma opção é executada sem justificativa e confirmação.</p></div><fieldset className="grid gap-2 sm:grid-cols-2"><legend className="mb-1 text-xs font-bold uppercase text-slate-500">Decisão</legend><label className={cn("cursor-pointer rounded-xl border p-3 text-sm", limitAction === "cool_and_polish" ? "border-orange-400 bg-orange-50" : "hover:bg-slate-50")}><input className="sr-only" type="radio" checked={limitAction === "cool_and_polish"} onChange={() => setLimitAction("cool_and_polish")} /><strong className="block">Retirar para resfriar e polir</strong><span className="mt-1 block text-xs text-slate-600">Cancela este ciclo. A ferramenta volta à fila para novo aquecimento após avaliação.</span></label><label className={cn("cursor-pointer rounded-xl border p-3 text-sm", limitAction === "release_at_risk" ? "border-red-400 bg-red-50" : "hover:bg-slate-50")}><input className="sr-only" type="radio" checked={limitAction === "release_at_risk"} onChange={() => setLimitAction("release_at_risk")} /><strong className="block">Liberar para produção sob risco</strong><span className="mt-1 block text-xs text-slate-600">Libera a ferramenta e registra o risco de acabamento para acompanhamento.</span></label></fieldset><label className="block text-sm font-semibold">Justificativa obrigatória<textarea value={limitReason} onChange={(event) => { setLimitReason(event.target.value); setDialogProblem(""); }} rows={3} placeholder={limitAction === "release_at_risk" ? "Ex.: urgência aprovada; acabamento será acompanhado pela Qualidade" : "Ex.: ferramenta será resfriada e polida antes de novo aquecimento"} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-orange-500" /><span className="mt-1 block text-xs font-normal text-slate-500">Responsável: {operatorName} · mínimo de 8 caracteres.</span></label>{dialogProblem && <p className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">{dialogProblem}</p>}</div><DialogFooter><Button variant="outline" onClick={() => setLimitCycle(null)}>Voltar</Button><Button variant={limitAction === "release_at_risk" ? "destructive" : "default"} onClick={() => void resolveLimit()} disabled={saving || limitReason.trim().length < 8}>{saving ? "Registrando..." : limitAction === "release_at_risk" ? "Assumir risco e liberar" : "Retirar para polir"}</Button></DialogFooter></DialogContent>
       </Dialog>
 
       <Dialog open={!!cancelCycle} onOpenChange={(open) => !open && setCancelCycle(null)}>
@@ -367,17 +495,36 @@ export function ToolOvenBoard() {
   );
 }
 
-function OvenMap({ ovens, heating, released, now, onRelease, onRelocate }: { ovens: ToolOven[]; heating: HeatingCycle[]; released: HeatingCycle[]; now: number; onRelease: (cycle: HeatingCycle) => void; onRelocate: (cycle: HeatingCycle) => void }) {
+function OvenMap({ ovens, heating, released, now, onRelease, onLimit, onRelocate }: { ovens: ToolOven[]; heating: HeatingCycle[]; released: HeatingCycle[]; now: number; onRelease: (cycle: HeatingCycle) => void; onLimit: (cycle: HeatingCycle) => void; onRelocate: (cycle: HeatingCycle) => void }) {
   const cycles = [...heating, ...released];
+  const machineCodes = [...new Set(ovens.map((oven) => oven.machine_code))].sort((left, right) => {
+    const order = ["18", "19"];
+    const leftIndex = order.indexOf(left);
+    const rightIndex = order.indexOf(right);
+    return (leftIndex < 0 ? 99 : leftIndex) - (rightIndex < 0 ? 99 : rightIndex) || left.localeCompare(right);
+  });
   return <section className="rounded-2xl border bg-white p-3 shadow-sm">
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h2 className="font-heading text-sm font-bold text-slate-900">Mapa do forno</h2><p className="text-[11px] text-slate-500">As ferramentas prontas mudam do vermelho claro ao escuro entre 4 h e 8 h de permanência.</p></div><div className="flex flex-wrap items-center gap-3 text-[10px] font-semibold text-slate-500"><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-orange-500" />Aquecendo</span><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-red-300" />Pronta</span><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-red-700" />Pronta há mais tempo</span><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-emerald-500" />Liberada</span><span className="inline-flex items-center gap-1"><i className="size-2 rounded-full border border-slate-300 bg-white" />Livre</span></div></div>
-    {ovens.length ? <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{ovens.map((oven) => {
-      const ovenCycles = cycles.filter((cycle) => cycle.oven_id === oven.id);
-      const byPosition = new Map(ovenCycles.map((cycle) => [cycle.oven_position, cycle]));
-      return <div key={oven.id} className="rounded-xl border bg-slate-50/70 p-2.5"><div className="mb-2 flex items-center justify-between"><div><p className="text-xs font-black text-slate-900">{oven.name}</p><p className="text-[10px] text-slate-500">Prensa {machineLabel(oven.machine_code)} · {ovenCycles.length}/{oven.position_count} ocupadas</p></div><span className="rounded-full bg-white px-2 py-1 text-[10px] font-bold text-slate-500">{oven.position_count - ovenCycles.length} livres</span></div><div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">{Array.from({ length: oven.position_count }, (_, index) => index + 1).map((position) => { const cycle = byPosition.get(position); if (!cycle) return <div key={position} className="flex min-h-16 flex-col justify-between rounded-lg border border-dashed border-slate-200 bg-white p-2"><span className="text-[9px] font-bold text-slate-400">Vaga {position}</span><span className="text-[10px] text-slate-400">Livre</span></div>; const isHeating = cycle.status === "heating"; const ready = isHeating && now >= new Date(cycle.expected_ready_at).getTime(); const readyState = ready ? readyEscalation(cycle, now) : null; const darkReady = (readyState?.level ?? 0) >= 4; return <button key={position} type="button" onClick={() => isHeating ? onRelease(cycle) : onRelocate(cycle)} className={cn("min-h-[4.5rem] rounded-lg border p-2 text-left transition hover:-translate-y-0.5 hover:shadow-sm", isHeating ? ready && readyState ? readyCardTone[readyState.level] : "border-orange-200 bg-orange-50" : "border-emerald-200 bg-emerald-50/80")} title={isHeating ? "Abrir opções de liberação" : "Abrir opções da ferramenta liberada"}><div className="flex items-start justify-between gap-1"><span className={cn("text-[9px] font-bold", darkReady ? "text-red-50" : "text-slate-500")}>Vaga {position}</span><span className={cn("size-2 rounded-full", isHeating ? ready ? darkReady ? "bg-white" : "bg-red-600" : "bg-orange-500" : "bg-emerald-500")} /></div><p className={cn("mt-1 truncate font-mono text-xs font-black", darkReady ? "text-white" : "text-slate-900")}>{cycle.tool_code}</p><p className={cn("truncate text-[9px] font-semibold", darkReady ? "text-red-50" : ready ? "text-red-700" : "text-slate-500")}>{isHeating ? ready && readyState ? `Pronta · +${duration(readyState.readyForMs)}` : duration(new Date(cycle.expected_ready_at).getTime() - now) : "Liberada"}</p></button>; })}</div></div>;
-    })}</div> : <Empty text="Nenhum forno cadastrado para esta prensa." />}
+    {ovens.length ? <div className="space-y-4">{machineCodes.map((machineCode) => <OvenBank key={machineCode} machineCode={machineCode} ovens={ovens.filter((oven) => oven.machine_code === machineCode)} cycles={cycles} now={now} onRelease={onRelease} onLimit={onLimit} onRelocate={onRelocate} />)}</div> : <Empty text="Nenhum forno cadastrado para esta prensa." />}
     <p className="mt-3 text-[10px] text-slate-400">Clique em uma vaga aquecendo para liberar/justificar, ou em uma vaga liberada para realocar a ferramenta.</p>
   </section>;
+}
+
+function OvenBank({ machineCode, ovens, cycles, now, onRelease, onLimit, onRelocate }: { machineCode: string; ovens: ToolOven[]; cycles: HeatingCycle[]; now: number; onRelease: (cycle: HeatingCycle) => void; onLimit: (cycle: HeatingCycle) => void; onRelocate: (cycle: HeatingCycle) => void }) {
+  const isPress19 = machineCode === "19";
+  const occupied = ovens.reduce((total, oven) => total + cycles.filter((cycle) => cycle.oven_id === oven.id).length, 0);
+  const capacity = ovens.reduce((total, oven) => total + oven.position_count, 0);
+  return <section className={cn("rounded-2xl border p-3", isPress19 ? "border-blue-200 bg-blue-50/45" : "border-orange-200 bg-orange-50/45")}>
+    <header className="flex flex-wrap items-center justify-between gap-2 border-b border-current/10 pb-2"><div className="flex items-center gap-2"><span className={cn("rounded-full px-2.5 py-1 text-xs font-black", isPress19 ? "bg-blue-100 text-blue-800" : "bg-orange-100 text-orange-800")}>Prensa {machineLabel(machineCode)}</span><p className="text-[11px] font-semibold text-slate-500">Fornos próprios · {ovens.length} forno(s)</p></div><span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-bold text-slate-600">{occupied}/{capacity} ocupadas · {capacity - occupied} livres</span></header>
+    <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{ovens.map((oven) => <OvenMapCard key={oven.id} oven={oven} cycles={cycles} now={now} onRelease={onRelease} onLimit={onLimit} onRelocate={onRelocate} />)}</div>
+  </section>;
+}
+
+function OvenMapCard({ oven, cycles, now, onRelease, onLimit, onRelocate }: { oven: ToolOven; cycles: HeatingCycle[]; now: number; onRelease: (cycle: HeatingCycle) => void; onLimit: (cycle: HeatingCycle) => void; onRelocate: (cycle: HeatingCycle) => void }) {
+  const ovenCycles = cycles.filter((cycle) => cycle.oven_id === oven.id);
+  const byPosition = new Map(ovenCycles.map((cycle) => [cycle.oven_position, cycle]));
+  const isPress19 = oven.machine_code === "19";
+  return <div className={cn("rounded-xl border bg-white/85 p-2.5", isPress19 ? "border-blue-200" : "border-orange-200")}><div className="mb-2 flex items-center justify-between"><div><p className="text-xs font-black text-slate-900">{oven.name}</p><p className="text-[10px] text-slate-500">{ovenCycles.length}/{oven.position_count} ocupadas</p></div><span className="rounded-full bg-slate-50 px-2 py-1 text-[10px] font-bold text-slate-500">{oven.position_count - ovenCycles.length} livres</span></div><div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">{Array.from({ length: oven.position_count }, (_, index) => index + 1).map((position) => { const cycle = byPosition.get(position); if (!cycle) return <div key={position} className="flex min-h-16 flex-col justify-between rounded-lg border border-dashed border-slate-200 bg-white p-2"><span className="text-[9px] font-bold text-slate-400">Vaga {position}</span><span className="text-[10px] text-slate-400">Livre</span></div>; const isHeating = cycle.status === "heating"; const ready = isHeating && now >= new Date(cycle.expected_ready_at).getTime(); const expired = isHeating && now >= new Date(cycle.maximum_due_at).getTime(); const readyState = ready ? readyEscalation(cycle, now) : null; const darkReady = (readyState?.level ?? 0) >= 4; return <button key={position} type="button" onClick={() => isHeating ? expired ? onLimit(cycle) : onRelease(cycle) : onRelocate(cycle)} className={cn("min-h-[4.5rem] rounded-lg border p-2 text-left transition hover:-translate-y-0.5 hover:shadow-sm", isHeating ? ready && readyState ? readyCardTone[readyState.level] : "border-orange-200 bg-orange-50" : "border-emerald-200 bg-emerald-50/80")} title={isHeating ? expired ? "Decidir destino da ferramenta" : "Abrir opções de liberação" : "Abrir opções da ferramenta liberada"}><div className="flex items-start justify-between gap-1"><span className={cn("text-[9px] font-bold", darkReady ? "text-red-50" : "text-slate-500")}>Vaga {position}</span><span className={cn("size-2 rounded-full", isHeating ? ready ? darkReady ? "bg-white" : "bg-red-600" : "bg-orange-500" : "bg-emerald-500")} /></div><p className={cn("mt-1 truncate font-mono text-xs font-black", darkReady ? "text-white" : "text-slate-900")}>{cycle.tool_code}</p><p className={cn("truncate text-[9px] font-semibold", darkReady ? "text-red-50" : ready ? "text-red-700" : "text-slate-500")}>{isHeating ? expired ? "Limite excedido · decidir" : ready && readyState ? `Pronta · +${duration(readyState.readyForMs)}` : duration(new Date(cycle.expected_ready_at).getTime() - now) : "Liberada"}</p></button>; })}</div></div>;
 }
 
 function BoardColumn({ title, subtitle, icon, value, detail, tone = "slate", children, collapsed = false, onToggle }: { title: string; subtitle: string; icon: React.ReactNode; value: number; detail: string; tone?: "slate" | "orange" | "green"; children: React.ReactNode; collapsed?: boolean; onToggle?: () => void }) {
@@ -386,10 +533,13 @@ function BoardColumn({ title, subtitle, icon, value, detail, tone = "slate", chi
 function StageToggle({ active, tone, onClick, children }: { active: boolean; tone: "slate" | "orange" | "green"; onClick: () => void; children: React.ReactNode }) {
   return <button type="button" onClick={onClick} aria-pressed={active} className={cn("inline-flex h-7 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-bold transition", active ? tone === "orange" ? "border-orange-300 bg-orange-50 text-orange-700" : tone === "green" ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-slate-300 bg-slate-100 text-slate-800" : "border-slate-200 bg-white text-slate-400 hover:bg-slate-50")}>{children}</button>;
 }
-function AvailableCard({ group, onChoose }: { group: ToolGroup; onChoose: () => void }) {
+function WaitingQueue({ machineCode, groups, total, page, pages, onPageChange, conflictedTools, onChoose }: { machineCode: string; groups: ToolGroup[]; total: number; page: number; pages: number; onPageChange: (page: number) => void; conflictedTools: Set<string>; onChoose: (group: ToolGroup) => void }) {
+  return <section className="rounded-xl border bg-slate-50/60 p-2.5"><div className="mb-2 flex items-center justify-between gap-2"><div><h3 className="text-sm font-bold text-slate-950">Aguardando · Prensa {machineLabel(machineCode)}</h3><p className="text-[11px] text-slate-500">Fila exclusiva da prensa</p></div><span className="rounded-full bg-white px-2 py-1 text-xs font-black text-slate-700">{total}</span></div>{total ? <div className="space-y-2">{groups.map((group) => <AvailableCard key={group.key} group={group} blocked={conflictedTools.has(group.tool.trim().toUpperCase())} onChoose={() => onChoose(group)} />)}<Pager page={page} pages={pages} onChange={onPageChange} /></div> : <Empty text={`Nenhuma ferramenta aguardando para a Prensa ${machineLabel(machineCode)}.`} />}</section>;
+}
+function AvailableCard({ group, blocked = false, onChoose }: { group: ToolGroup; blocked?: boolean; onChoose: () => void }) {
   const plans = [...new Set(group.orders.map((order) => order.plan_code).filter(Boolean))];
   const customers = [...new Set(group.orders.map((order) => order.customer_name).filter(Boolean))];
-  return <article className="group rounded-xl border px-3 py-2.5 transition hover:border-orange-300 hover:bg-orange-50/30"><div className="flex items-center gap-3"><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><p className="truncate font-mono text-base font-black text-orange-600">{group.tool}</p><span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-bold">{group.orders.length}</span></div><p className="truncate text-[11px] text-slate-500">P{machineLabel(group.machine)} · Plano {plans.join(", ") || "—"} · {customers.join(", ") || "Sem cliente"}</p><PlannedTimes orders={group.orders} compact /></div><div className="shrink-0 text-right"><p className="text-xs font-black text-slate-900">{group.orders.map(orderDemand).join(" + ")}</p><Button className="mt-1 h-7 px-2.5 text-xs" size="sm" onClick={onChoose}><Flame className="size-3.5" />Enviar</Button></div></div></article>;
+  return <article className={cn("group rounded-xl border px-3 py-2.5 transition", blocked ? "border-red-200 bg-red-50/50" : "hover:border-orange-300 hover:bg-orange-50/30")}><div className="flex items-center gap-3"><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><p className="truncate font-mono text-base font-black text-orange-600">{group.tool}</p><span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-bold">{group.orders.length}</span></div><p className="truncate text-[11px] text-slate-500">P{machineLabel(group.machine)} · Plano {plans.join(", ") || "—"} · {customers.join(", ") || "Sem cliente"}</p>{blocked && <p className="mt-1 text-[10px] font-bold text-red-700">Conferir: a ferramenta também está programada na outra prensa.</p>}<PlannedTimes orders={group.orders} compact /></div><div className="shrink-0 text-right"><p className="text-xs font-black text-slate-900">{group.orders.map(orderDemand).join(" + ")}</p><Button className="mt-1 h-7 px-2.5 text-xs" size="sm" disabled={blocked} title={blocked ? "Corrija a programação duplicada antes de enviar ao forno." : undefined} onClick={onChoose}><Flame className="size-3.5" />{blocked ? "Corrigir" : "Enviar"}</Button></div></div></article>;
 }
 function PlannedTimes({ orders, compact = false }: { orders: HeatingOrder[]; compact?: boolean }) {
   const entries = [...new Set(orders.map((order) => order.source_data?.entradaForno).filter(Boolean))];
@@ -397,7 +547,7 @@ function PlannedTimes({ orders, compact = false }: { orders: HeatingOrder[]; com
   if (!entries.length && !exits.length) return compact ? null : <p className="rounded-lg bg-slate-50 p-2 text-xs text-slate-500">A planilha não possui horários preenchidos. A entrada real será registrada agora.</p>;
   return <div className={cn("flex gap-2 rounded-lg bg-blue-50 text-xs text-blue-800", compact ? "mt-1 px-1.5 py-0.5 text-[10px]" : "mt-2 p-3")}><Clock3 className={cn("shrink-0", compact ? "size-3" : "size-4")} /><span>Excel: {entries.join(", ") || "—"} → {exits.join(", ") || "—"}</span></div>;
 }
-function HeatingCard({ cycle, now, saving, onRelease, onCancel, onRelocate }: { cycle: HeatingCycle; now: number; saving: boolean; onRelease: () => void; onCancel: () => void; onRelocate: () => void }) {
+function HeatingCard({ cycle, now, saving, onRelease, onCancel, onLimit, onRelocate }: { cycle: HeatingCycle; now: number; saving: boolean; onRelease: () => void; onCancel: () => void; onLimit: () => void; onRelocate: () => void }) {
   const end = new Date(cycle.expected_ready_at).getTime();
   const maximum = new Date(cycle.maximum_due_at).getTime();
   const start = new Date(cycle.entered_at).getTime();
@@ -438,12 +588,12 @@ function HeatingCard({ cycle, now, saving, onRelease, onCancel, onRelocate }: { 
           <ThermalCurve cycle={cycle} now={now} progress={progress} ready={ready} expired={expired} />
         </div>
         {nearMaximum && <p className="mt-2 rounded-lg bg-amber-50 px-2 py-1.5 text-xs font-bold text-amber-700">Atenção: aproximação do limite máximo de permanência.</p>}
-        {expired && <p className="mt-2 rounded-lg bg-red-50 px-2 py-1.5 text-xs font-bold text-red-700">Liberação bloqueada. Retire a ferramenta e encaminhe para avaliação.</p>}
+        {expired && <p className="mt-2 rounded-lg bg-red-50 px-2 py-1.5 text-xs font-bold text-red-700">Escolha o destino: liberar sob risco ou retirar para resfriar e polir.</p>}
       </div>
       <div className="mt-2 grid grid-cols-3 gap-2">
-        <Button className="h-8 text-xs" variant="outline" size="sm" onClick={onRelocate}><ArrowRightLeft className="size-3.5" />Realocar</Button>
-        <Button className="h-8 text-xs" variant="outline" size="sm" onClick={onCancel}><X className="size-3.5" />{expired ? "Retirar" : "Cancelar"}</Button>
-        <Button className={cn("h-8 text-xs", !ready && !expired && "bg-amber-500 text-white hover:bg-amber-600")} size="sm" disabled={saving || expired} onClick={onRelease}><CheckCircle2 className="size-3.5" />{ready ? "Liberar" : expired ? "Bloqueada" : "Liberar antes"}</Button>
+        <Button className="h-8 border-slate-300 bg-white text-slate-800 hover:bg-slate-100 hover:text-slate-950 disabled:border-slate-300 disabled:bg-slate-100 disabled:text-slate-700 disabled:opacity-100 text-xs" variant="outline" size="sm" onClick={onRelocate}><ArrowRightLeft className="size-3.5" />Realocar</Button>
+        <Button className="h-8 border-slate-300 bg-white text-slate-800 hover:bg-slate-100 hover:text-slate-950 disabled:border-slate-300 disabled:bg-slate-100 disabled:text-slate-700 disabled:opacity-100 text-xs" variant="outline" size="sm" onClick={expired ? onLimit : onCancel}><X className="size-3.5" />{expired ? "Decidir destino" : "Cancelar"}</Button>
+        <Button className={cn("h-8 text-xs", !ready && !expired && "bg-amber-500 text-white hover:bg-amber-600")} size="sm" disabled={saving || expired} onClick={onRelease}><CheckCircle2 className="size-3.5" />{ready ? "Liberar" : expired ? "Ver decisão" : "Liberar antes"}</Button>
       </div>
     </article>
   );
@@ -472,8 +622,8 @@ function ThermalCurve({ cycle, now, progress, ready, expired }: { cycle: Heating
   const elapsedMinutes = Math.max(0, Math.floor((now - new Date(cycle.entered_at).getTime()) / 60000));
   return <div className="mt-2 overflow-hidden rounded-lg border border-orange-100 bg-gradient-to-r from-orange-50/70 via-white to-amber-50/60 px-2.5 pb-1.5 pt-2" aria-label={`Simulação térmica: temperatura estimada ${estimatedTemperature} graus Celsius, alvo ${targetTemperature} graus Celsius`}>
     <div className="flex items-center justify-between gap-2">
-      <div className="flex min-w-0 items-center gap-1.5"><Flame className={cn("size-3.5 shrink-0", expired ? "text-red-500" : ready ? "text-emerald-500" : "text-orange-500")} /><p className="truncate text-[9px] font-black uppercase tracking-[.12em] text-slate-500">Simulação térmica</p><span className="rounded-full bg-white px-1.5 py-0.5 text-[8px] font-bold text-slate-400 ring-1 ring-slate-100">estimada</span></div>
-      <p className={cn("shrink-0 font-mono text-sm font-black", expired ? "text-red-600" : ready ? "text-emerald-600" : "text-orange-600")}><span className="text-[9px] font-bold text-slate-400">agora </span>{estimatedTemperature} °C</p>
+      <div className="flex min-w-0 items-center gap-1.5"><Flame className={cn("size-3.5 shrink-0", expired ? "text-red-500" : ready ? "text-emerald-500" : "text-orange-500")} /><p className="truncate text-[9px] font-black uppercase tracking-[.12em] text-slate-600">Simulação térmica</p><span className="rounded-full bg-white px-1.5 py-0.5 text-[8px] font-bold text-slate-600 ring-1 ring-slate-200">estimada</span></div>
+      <p className={cn("shrink-0 font-mono text-sm font-black", expired ? "text-red-600" : ready ? "text-emerald-600" : "text-orange-600")}><span className="text-[9px] font-bold text-slate-600">agora </span>{estimatedTemperature} °C</p>
     </div>
     <svg viewBox="0 0 200 57" role="img" className="mt-0.5 h-[58px] w-full" preserveAspectRatio="none">
       <defs><linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={expired ? "#ef4444" : ready ? "#10b981" : "#f97316"} stopOpacity="0.32" /><stop offset="100%" stopColor="#fff7ed" stopOpacity="0.05" /></linearGradient></defs>
@@ -486,14 +636,14 @@ function ThermalCurve({ cycle, now, progress, ready, expired }: { cycle: Heating
       <text x={chartLeft} y="56" fill="#94a3b8" fontSize="6">25 °C</text>
       <text x={chartRight} y="56" fill="#64748b" fontSize="6" textAnchor="end">alvo {targetTemperature} °C</text>
     </svg>
-    <div className="-mt-0.5 flex items-center justify-between text-[8px] font-medium text-slate-400"><span>{elapsedMinutes} min no forno</span><span>{ready || expired ? "temperatura estabilizada" : `${Math.round(progress)}% do aquecimento mínimo`}</span></div>
+    <div className="-mt-0.5 flex items-center justify-between text-[8px] font-medium text-slate-600"><span>{elapsedMinutes} min no forno</span><span>{ready || expired ? "temperatura estabilizada" : `${Math.round(progress)}% do aquecimento mínimo`}</span></div>
   </div>;
 }
 function ReleasedCard({ cycle, onRelocate }: { cycle: HeatingCycle; onRelocate: () => void }) {
   const orders = cycle.tool_heating_cycle_orders.map((link) => link.production_orders).filter((order): order is HeatingOrder => !!order && order.is_active && ["planned","released","paused"].includes(order.status)); const query = new URLSearchParams({ tool: cycle.tool_code, machine: cycle.machine_code, orders: orders.map((order) => order.id).join(",") });
   return <article className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3"><div className="flex items-center justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-2"><p className="font-mono text-lg font-black text-emerald-700">{cycle.tool_code}</p>{cycle.released_early && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-black uppercase text-amber-700">Antecipada</span>}</div><p className="truncate text-[11px] text-slate-500">P{machineLabel(cycle.machine_code)} · {orders.length} item(ns) · {cycle.actual_heating_minutes ?? "—"} min · saída {clock(cycle.released_at)} · {cycle.released_by_name || "—"}</p></div><CheckCircle2 className="size-5 shrink-0 text-emerald-600" /></div><div className="mt-2 grid grid-cols-[auto_1fr] gap-2"><Button className="h-8 text-xs" variant="outline" size="sm" onClick={onRelocate}><ArrowRightLeft className="size-3.5" />Prensa</Button><Button className="h-8 text-xs" size="sm" render={<Link href={`/producao?${query.toString()}`} />}><Play className="size-3.5" />Abrir ficha</Button></div>{cycle.released_early && cycle.release_notes && <p className="mt-2 truncate rounded-lg bg-amber-50 px-2 py-1 text-[10px] text-amber-800" title={cycle.release_notes}>{cycle.release_notes}</p>}</article>;
 }
-function Time({ label, value }: { label: string; value: string }) { return <div><p className="text-slate-400">{label}</p><p className="mt-0.5 text-xs font-bold text-slate-800">{value}</p></div>; }
+function Time({ label, value }: { label: string; value: string }) { return <div><p className="font-medium text-slate-600">{label}</p><p className="mt-0.5 text-xs font-bold text-slate-900">{value}</p></div>; }
 function Pager({ page, pages, onChange }: { page: number; pages: number; onChange: (page: number) => void }) {
   if (pages <= 1) return null;
   return <nav className="flex items-center justify-between border-t pt-2" aria-label="Paginação"><span className="text-[10px] text-slate-500">Página {page} de {pages}</span><div className="flex gap-1"><button type="button" aria-label="Página anterior" disabled={page <= 1} onClick={() => onChange(page - 1)} className="grid size-7 place-items-center rounded-lg border bg-white disabled:opacity-35"><ChevronLeft className="size-4" /></button><button type="button" aria-label="Próxima página" disabled={page >= pages} onClick={() => onChange(page + 1)} className="grid size-7 place-items-center rounded-lg border bg-white disabled:opacity-35"><ChevronRight className="size-4" /></button></div></nav>;

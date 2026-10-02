@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { requestOfflineSync } from "@/lib/offline-store";
+import { normalizeProductivityKgH } from "@/modules/planning/productivity";
 import type { SimplifiedRow } from "@/types/database";
 
 type Cell = string | number | boolean | Date | null;
@@ -557,7 +558,7 @@ export function SimplifiedImport() {
             sequence: index + 1,
             status: "planned",
             requires_tool_heating: true,
-            last_productivity_kg_h: row.ultimaProdutividadeKgH || null,
+            last_productivity_kg_h: normalizeProductivityKgH(row.ultimaProdutividadeKgH),
             holes: row.furos && row.furos > 0 ? Math.round(row.furos) : null,
             bo_code: row.bo || null,
             package_measure_mm: row.medidaPacote || null,
@@ -726,7 +727,7 @@ export function SimplifiedImport() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-4 gap-3 border-b bg-slate-50/70 px-4 py-3">
+          <div className="grid grid-cols-2 gap-3 border-b bg-slate-50/70 px-4 py-3 sm:grid-cols-4">
             <Summary label="Itens encontrados" value={rows.length} />
             <Summary label="Programações ativas" value={activeCount} accent />
             <Summary
@@ -740,7 +741,7 @@ export function SimplifiedImport() {
             />
           </div>
           <div className="max-h-[calc(100dvh-390px)] min-h-52 overflow-auto">
-            <table className="w-full min-w-[900px] text-left text-[11px]">
+            <table className="w-full min-w-[760px] text-left text-[11px] min-[1440px]:min-w-[900px]">
               <thead className="sticky top-0 z-10 bg-slate-50 text-[9px] uppercase tracking-wider text-slate-500">
                 <tr>
                   {[

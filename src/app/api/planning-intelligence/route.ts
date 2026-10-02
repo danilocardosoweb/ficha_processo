@@ -17,6 +17,9 @@ const schema = z
     maxConsecutiveHighHoleTools: z.number().int().min(1).max(20),
     lowVolumeThresholdKg: z.number().min(1).max(100_000),
     aiEnabled: z.boolean(),
+    aiProvider: z.enum(["openrouter", "lmstudio", "openai", "openclaw"]),
+    aiProviderEndpoint: z.string().trim().max(300),
+    aiExternalDataEnabled: z.boolean(),
     aiModelMode: z.enum(["auto", "manual"]),
     aiModel: z.string().trim().min(3).max(160),
     aiPersonalityPrompt: z.string().trim().min(40).max(6000),
@@ -52,15 +55,32 @@ export async function GET() {
     "local_get_planning_intelligence",
     { p_token: ctx.token },
   );
-  if (error)
-    return NextResponse.json({ error: error.message }, { status: 400 });
+  if (error) {
+    const migrationPending =
+      error.code === "PGRST202" ||
+      /local_save_planning_intelligence_settings_v3/i.test(error.message);
+    return NextResponse.json(
+      {
+        error: migrationPending
+          ? "A tela já está pronta, mas a base ainda precisa receber a atualização de planejamento com IA. A configuração atual foi preservada; aplique a migração 20260930020000 antes de salvar estas novas opções."
+          : error.message,
+        migrationRequired: migrationPending,
+      },
+      { status: migrationPending ? 503 : 400 },
+    );
+  }
   const payload =
     data && typeof data === "object"
       ? (data as Record<string, unknown>)
       : { settings: null, summary: null, groups: [], recent: [] };
   return NextResponse.json({
     ...payload,
-    aiConfigured: Boolean(process.env.OPENROUTER_API_KEY),
+    aiConfigured: Boolean(
+      process.env.OPENROUTER_API_KEY ||
+        process.env.OPENAI_API_KEY ||
+        process.env.LM_STUDIO_BASE_URL ||
+        (process.env.OPENCLAW_BASE_URL && process.env.OPENCLAW_API_KEY),
+    ),
   });
 }
 
@@ -76,7 +96,7 @@ export async function POST(request: Request) {
     );
   const value = parsed.data;
   const { error } = await ctx.supabase.rpc(
-    "local_save_planning_intelligence_settings_v2",
+    "local_save_planning_intelligence_settings_v3",
     {
       p_token: ctx.token,
       p_thermal: value.thermal,
@@ -91,6 +111,9 @@ export async function POST(request: Request) {
       p_max_consecutive_high_hole_tools: value.maxConsecutiveHighHoleTools,
       p_low_volume_threshold_kg: value.lowVolumeThresholdKg,
       p_ai_enabled: value.aiEnabled,
+      p_ai_provider: value.aiProvider,
+      p_ai_provider_endpoint: value.aiProviderEndpoint,
+      p_ai_external_data_enabled: value.aiExternalDataEnabled,
       p_ai_model_mode: value.aiModelMode,
       p_ai_model: value.aiModel,
       p_ai_personality_prompt: value.aiPersonalityPrompt,

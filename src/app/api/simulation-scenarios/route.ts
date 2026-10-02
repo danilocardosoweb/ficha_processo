@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getSessionToken } from "@/lib/local-auth/server";
 import { createClient } from "@/lib/supabase/server";
+import { profileSchema } from "@/modules/planning/decision-system/schema";
+import { evaluateDecision } from "@/modules/planning/decision-system/engine";
+import type { LoadSimulation } from "@/modules/planning/machine-load-simulator";
 
 const saveSchema = z.object({
   scenarioId: z.string().uuid().nullable().default(null),
@@ -61,6 +64,24 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: parsed.error.issues[0]?.message || "Revise os dados do cenário." }, { status: 400 });
   }
   const value = parsed.data;
+  if (value.rulesSnapshot.modelVersion === "alupilot-v3.0") {
+    try {
+      const profile = profileSchema.parse(value.rulesSnapshot.decisionProfile);
+      const simulation = JSON.parse(JSON.stringify(value.resultSnapshot), (key, item) =>
+        key.endsWith("At") && typeof item === "string" ? new Date(item) : item) as LoadSimulation;
+      const stock = z.object({
+        confirmed: z.boolean().default(false),
+        summary: z.array(z.object({alloyCode:z.string(),availableBars:z.number().nonnegative(),availableWeightKg:z.coerce.number().nonnegative()}))
+      }).parse(value.rulesSnapshot.billetStock);
+      // Re-evaluate the stored scenario, never trust the browser's score.
+      // This is snapshot validation; approval still checks current resource reservations in the database.
+      const decision = evaluateDecision(simulation, profile, stock.summary, stock.confirmed);
+      value.analysisSnapshot.decision = decision;
+      value.resultSnapshot.feasible = simulation.feasible && decision.status === "viable";
+    } catch {
+      return NextResponse.json({error:"Os dados deste cenário estão incompletos. Atualize a carga e calcule novamente antes de salvar."},{status:400});
+    }
+  }
   const { data, error } = await ctx.supabase.rpc("local_save_simulation_scenario_v2", {
     p_token: ctx.token,
     p_scenario_id: value.scenarioId,

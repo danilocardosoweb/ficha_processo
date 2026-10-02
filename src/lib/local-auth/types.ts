@@ -23,6 +23,7 @@ export type LocalUser = {
   machine_codes: string[];
   must_change_password: boolean;
   expires_at: string;
+  access_overrides?: Partial<Record<string, boolean>>;
 };
 
 export type ManagedUser = {
@@ -39,6 +40,7 @@ export type ManagedUser = {
   is_online?: boolean;
   created_at: string;
   updated_at: string;
+  access_overrides?: Partial<Record<string, boolean>>;
 };
 
 export function userInitials(name: string) {

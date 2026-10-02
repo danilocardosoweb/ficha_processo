@@ -12,7 +12,9 @@ export const accessAreas = [
   { key: "maintenance", label: "Manutenção" },
   { key: "quality", label: "Qualidade" },
   { key: "indicators", label: "Indicadores" },
+  { key: "reports", label: "Relatórios" },
   { key: "messages", label: "Avisos operacionais" },
+  { key: "diary", label: "Report da Produção" },
   { key: "audit", label: "Auditoria" },
   { key: "administration", label: "Administração" },
 ] as const;
@@ -23,17 +25,17 @@ type AccessFlags = Record<AccessArea, boolean>;
 const none = (): AccessFlags => Object.fromEntries(accessAreas.map((area) => [area.key, false])) as AccessFlags;
 const grant = (...areas: AccessArea[]): AccessFlags => ({ ...none(), ...Object.fromEntries(areas.map((area) => [area, true])) });
 
-export const assignableRoles: LocalRole[] = ["admin", "manager", "pcp", "engineering", "maintenance", "quality", "viewer"];
+export const assignableRoles: LocalRole[] = ["admin", "manager", "pcp", "operator", "engineering", "maintenance", "quality", "viewer"];
 
 export const roleAccess: Record<LocalRole, AccessFlags> = {
   admin: grant(...accessAreas.map((area) => area.key)),
-  manager: grant("dashboard", "production", "orders", "import", "oven", "planning", "simulation", "engineering", "maintenance", "quality", "indicators", "messages", "audit"),
-  pcp: grant("dashboard", "production", "orders", "import", "oven", "planning", "simulation", "indicators", "messages", "audit"),
-  engineering: grant("dashboard", "orders", "oven", "planning", "simulation", "engineering", "quality", "indicators"),
-  maintenance: grant("dashboard", "oven", "maintenance", "indicators"),
-  quality: grant("dashboard", "orders", "quality", "indicators"),
-  viewer: grant("dashboard", "orders", "oven", "indicators"),
-  operator: grant("dashboard", "production", "orders", "oven", "indicators"),
+  manager: grant("dashboard", "production", "orders", "import", "oven", "planning", "simulation", "engineering", "maintenance", "quality", "indicators", "reports", "messages", "diary", "audit"),
+  pcp: grant("dashboard", "production", "orders", "import", "oven", "planning", "simulation", "indicators", "reports", "messages", "diary", "audit"),
+  engineering: grant("dashboard", "orders", "oven", "planning", "simulation", "engineering", "quality", "indicators", "reports", "diary"),
+  maintenance: grant("dashboard", "oven", "maintenance", "indicators", "reports", "diary"),
+  quality: grant("dashboard", "orders", "quality", "indicators", "reports", "diary"),
+  viewer: grant("dashboard", "orders", "oven", "indicators", "reports", "diary"),
+  operator: grant("dashboard", "production", "orders", "oven", "maintenance", "indicators", "reports", "diary"),
 };
 
 export const roleDescriptions: Record<LocalRole, string> = {
@@ -47,10 +49,11 @@ export const roleDescriptions: Record<LocalRole, string> = {
   operator: "Perfil operacional legado. Reclassifique quando possível.",
 };
 
-export function canAccess(role: LocalRole, area: AccessArea) {
+export function canAccess(role: LocalRole, area: AccessArea, overrides?: Partial<Record<string, boolean>>) {
+  if (overrides && Object.prototype.hasOwnProperty.call(overrides, area)) return overrides[area] === true;
   return roleAccess[role]?.[area] ?? false;
 }
 
-export function visibleAccessAreas(role: LocalRole) {
-  return accessAreas.filter((area) => canAccess(role, area.key));
+export function visibleAccessAreas(role: LocalRole, overrides?: Partial<Record<string, boolean>>) {
+  return accessAreas.filter((area) => canAccess(role, area.key, overrides));
 }
