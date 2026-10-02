@@ -3,7 +3,7 @@
 /* The operational board intentionally polls external state and uses a wall clock for countdowns. */
 /* eslint-disable react-hooks/set-state-in-effect, react-hooks/purity */
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode, type TextareaHTMLAttributes } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
@@ -135,6 +135,7 @@ export function OvenOperational({ user }: { user: LocalUser }) {
   const [limitReason, setLimitReason] = useState("");
   const [query, setQuery] = useState("");
   const [machineFilterReady, setMachineFilterReady] = useState(false);
+  const loadingRef = useRef(false);
   const machineFilterKey = `tecnomes:forno-operacional:machine-filter:${user.user_id}`;
 
   const load = useCallback(async (silent = false) => {
@@ -143,13 +144,15 @@ export function OvenOperational({ user }: { user: LocalUser }) {
       setLoading(false);
       return;
     }
+    if (loadingRef.current) return;
+    loadingRef.current = true;
     if (!silent) setLoading(true); else setRefreshing(true);
     try {
       const supabase = createClient();
       const [{ data: orderData, error: orderError }, { data: cycleData, error: cycleError }, { data: ovenData, error: ovenError }] = await Promise.all([
-        supabase.from("production_orders").select(`${orderFields},simplified_imports!inner(id,is_active,status,deleted_at)`).eq("organization_id", organizationId).eq("is_active", true).in("status", ["planned", "released", "paused"]).eq("simplified_imports.is_active", true).eq("simplified_imports.status", "processed").is("simplified_imports.deleted_at", null).order("sequence").limit(2000),
-        supabase.from("tool_heating_cycles").select(cycleFields).eq("organization_id", organizationId).in("status", ["heating", "released"]).order("entered_at", { ascending: false }).limit(500),
-        supabase.from("tool_ovens").select(ovenFields).eq("organization_id", organizationId).eq("is_active", true).order("machine_code").order("code"),
+        supabase.from("production_orders").select(`${orderFields},simplified_imports!inner(id,is_active,status,deleted_at)`).eq("organization_id", organizationId).eq("machine_code", machine).eq("is_active", true).in("status", ["planned", "released", "paused"]).eq("simplified_imports.is_active", true).eq("simplified_imports.status", "processed").is("simplified_imports.deleted_at", null).order("sequence").limit(2000),
+        supabase.from("tool_heating_cycles").select(cycleFields).eq("organization_id", organizationId).eq("machine_code", machine).in("status", ["heating", "released"]).order("entered_at", { ascending: false }).limit(500),
+        supabase.from("tool_ovens").select(ovenFields).eq("organization_id", organizationId).eq("machine_code", machine).eq("is_active", true).order("code"),
       ]);
       if (orderError) throw orderError;
       if (cycleError) throw cycleError;
@@ -161,10 +164,11 @@ export function OvenOperational({ user }: { user: LocalUser }) {
     } catch (error) {
       setNotice(errorMessage(error));
     } finally {
+      loadingRef.current = false;
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [machine]);
 
   useEffect(() => {
     let active = true;
@@ -181,7 +185,9 @@ export function OvenOperational({ user }: { user: LocalUser }) {
   useEffect(() => { if (machineFilterReady) try { window.localStorage.setItem(machineFilterKey, machine); } catch {} }, [machine, machineFilterKey, machineFilterReady]);
   useEffect(() => {
     void load();
-    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void load(true); }, 15000);
+    // O contador continua localmente em tempo real; a consulta ao banco não precisa
+    // repetir três payloads grandes a cada 15 segundos.
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void load(true); }, 60_000);
     return () => window.clearInterval(timer);
   }, [load]);
   useEffect(() => {

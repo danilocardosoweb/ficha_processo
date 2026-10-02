@@ -417,6 +417,7 @@ export function ProductionCockpit() {
   const [readinessLoading, setReadinessLoading] = useState(true);
   const [readinessError, setReadinessError] = useState("");
   const [readinessUpdatedAt, setReadinessUpdatedAt] = useState<string | null>(null);
+  const readinessLoadRef = useRef(false);
   const selected = useMemo(
     () => sheets.find((sheet) => sheet.id === selectedId),
     [sheets, selectedId],
@@ -446,7 +447,8 @@ export function ProductionCockpit() {
   const canEditWorkSequence = role === "admin" || role === "manager" || role === "pcp";
 
   const loadProductionReadiness = useCallback(async () => {
-    if (!organizationId) return;
+    if (!organizationId || readinessLoadRef.current) return;
+    readinessLoadRef.current = true;
     setReadinessLoading(true);
     try {
       const supabase = createClient();
@@ -518,16 +520,24 @@ export function ProductionCockpit() {
     } catch (cause) {
       setReadinessError(errorMessage(cause));
     } finally {
+      readinessLoadRef.current = false;
       setReadinessLoading(false);
     }
   }, [allowedMachines, canUseMachine]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void loadProductionReadiness(), 0);
-    const refresh = window.setInterval(() => void loadProductionReadiness(), 30_000);
+    const refresh = window.setInterval(() => {
+      if (document.visibilityState === "visible") void loadProductionReadiness();
+    }, 60_000);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void loadProductionReadiness();
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => {
       window.clearTimeout(timer);
       window.clearInterval(refresh);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
   }, [loadProductionReadiness]);
 

@@ -70,7 +70,7 @@ export function OfflineStatus() {
     const initialSync = window.setTimeout(() => void initialize(), 0);
     const interval = window.setInterval(
       () => {
-        if (navigator.onLine) void sync();
+        if (document.visibilityState === "visible" && navigator.onLine) void sync();
       },
       15 * 60 * 1000,
     );
