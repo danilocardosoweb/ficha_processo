@@ -30,6 +30,15 @@ export interface ProductionOrder {
   is_active?: boolean;
   due_date: string | null;
   sequence: number;
+  /** Sequência original da Simplificada, preservada para auditoria. */
+  original_machine_code?: string | null;
+  original_sequence?: number | null;
+  /** Origem da sequência atualmente usada pela operação. */
+  active_sequence_source?: "original" | "simulation";
+  active_sequence_scenario_id?: string | null;
+  active_sequence_version?: number | null;
+  active_sequence_approved_at?: string | null;
+  active_sequence_approved_by_name?: string | null;
   status: OrderStatus;
   notes: string | null;
   source_data: Record<string, unknown>;
@@ -58,6 +67,11 @@ export interface SimplifiedQueue {
   deleted_at?: string | null;
   deleted_by_name?: string | null;
   deletion_reason?: string | null;
+  active_sequence_source?: "original" | "simulation";
+  active_sequence_scenario_id?: string | null;
+  active_sequence_version?: number | null;
+  active_sequence_approved_at?: string | null;
+  active_sequence_approved_by_name?: string | null;
   production_orders: ProductionOrder[];
 }
 

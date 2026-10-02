@@ -1,3 +1,8 @@
+drop policy if exists tool_heating_cycle_orders_authenticated_insert on public.tool_heating_cycle_orders;
+drop policy if exists tool_heating_cycle_orders_v1_insert on public.tool_heating_cycle_orders;
+drop policy if exists tool_heating_history_authenticated_insert on public.tool_heating_history;
+drop policy if exists tool_heating_history_v1_insert on public.tool_heating_history;
+
 create policy tool_heating_cycle_orders_authenticated_insert on public.tool_heating_cycle_orders
   for insert to authenticated with check (exists (
     select 1 from public.tool_heating_cycles c

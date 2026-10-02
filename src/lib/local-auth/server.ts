@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { LOCAL_SESSION_COOKIE, type LocalUser, type ManagedUser } from "@/lib/local-auth/types";
 import { canAccess, type AccessArea } from "@/lib/access-control";
+import { getDevelopmentUser, isDevelopmentSession } from "@/lib/local-auth/development";
 
 export async function getSessionToken() {
   return (await cookies()).get(LOCAL_SESSION_COOKIE)?.value ?? null;
@@ -13,6 +14,7 @@ export async function getSessionToken() {
 export async function getCurrentUser(): Promise<LocalUser | null> {
   const token = await getSessionToken();
   if (!token) return null;
+  if (isDevelopmentSession(token)) return getDevelopmentUser();
   try {
     const supabase = await createClient();
     const { data, error } = await supabase.rpc("local_get_session", { p_token: token });
@@ -37,7 +39,7 @@ export async function requireAdmin() {
 
 export async function requirePermission(area: AccessArea) {
   const user = await requireCurrentUser();
-  if (!canAccess(user.role, area)) redirect("/dashboard");
+  if (!canAccess(user.role, area, user.access_overrides)) redirect("/dashboard");
   return user;
 }
 

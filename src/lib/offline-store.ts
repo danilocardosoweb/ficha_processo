@@ -229,7 +229,7 @@ export async function syncOfflineResource(resource: OfflineResource, options: { 
       let query = supabase
       .from("production_orders")
       .select(
-        "id,import_batch_id,order_number,plan_code,machine_code,tool_code,product_code,customer_name,alloy_code,temper,target_kg,target_quantity,demand_unit,is_active,produced_kg,produced_quantity,status,sequence,actual_start,actual_end,started_by_name,completed_by_name,reopened_at,reopened_by_name,reprogram_count,due_date,updated_at",
+        "id,import_batch_id,order_number,plan_code,machine_code,tool_code,product_code,customer_name,alloy_code,temper,target_kg,target_quantity,demand_unit,is_active,produced_kg,produced_quantity,status,sequence,original_machine_code,original_sequence,active_sequence_source,active_sequence_scenario_id,active_sequence_version,active_sequence_approved_at,active_sequence_approved_by_name,actual_start,actual_end,started_by_name,completed_by_name,reopened_at,reopened_by_name,reprogram_count,due_date,updated_at",
       )
       .eq("organization_id", organizationId);
       query = since ? query.gte("updated_at", since) : query.eq("is_active", true).in("status", ["planned", "released", "in_progress", "paused"]);

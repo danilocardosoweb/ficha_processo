@@ -1,3 +1,9 @@
+import { OPERATOR_LANGUAGE_GUIDE } from "@/modules/planning/operator-language";
+import {
+  analysisPacketSchema,
+  makeStandardAnalysisFields,
+} from "@/modules/planning/ai/contracts";
+import { resolvePlanningAnalysisProvider } from "@/modules/planning/ai/provider";
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -6,17 +12,7 @@ import { createClient } from "@/lib/supabase/server";
 
 export const maxDuration = 120;
 
-const packetSchema = z.object({
-  generatedAt: z.string().datetime(),
-  mode: z.string().max(30),
-  score: z.record(z.string(), z.unknown()),
-  machines: z.array(z.record(z.string(), z.unknown())).max(10),
-  materials: z.array(z.record(z.string(), z.unknown())).max(50),
-  resources: z.record(z.string(), z.unknown()),
-  deterministicRecommendations: z
-    .array(z.record(z.string(), z.unknown()))
-    .max(100),
-});
+const packetSchema = analysisPacketSchema;
 
 const aiResultSchema = z.object({
   executiveSummary: z.string().min(20).max(1800),
@@ -192,6 +188,16 @@ function normalizeProposedScenario(
   };
 }
 
+function standardizeResult(
+  result: z.infer<typeof aiResultSchema>,
+  packet: z.infer<typeof packetSchema>,
+) {
+  return {
+    ...result,
+    ...makeStandardAnalysisFields(packet, result.proposedScenario.machines),
+  };
+}
+
 function friendlyAiError(cause: unknown) {
   if (cause instanceof z.ZodError || cause instanceof SyntaxError)
     return "O modelo devolveu uma resposta incompleta. Tente novamente; o AluPilot escolherá outro modelo automaticamente.";
@@ -279,12 +285,12 @@ function deterministicFallback(
   const hasCritical = recommendations.some(
     (item) => item.priority === "critical",
   );
-  return aiResultSchema.parse({
+  const result = aiResultSchema.parse({
     executiveSummary: hasCritical
       ? "A análise segura encontrou bloqueios que precisam ser resolvidos antes de iniciar a produção. Siga o passo a passo das ações urgentes e calcule novamente."
       : "A análise segura encontrou pontos de atenção. Confira as orientações abaixo antes de decidir se a sequência pode seguir.",
     decision: hasCritical ? "blocked" : "approve_with_adjustments",
-    confidence: 35,
+    confidence: 0,
     recommendations,
     assumptions: [],
     missingData: [
@@ -303,6 +309,7 @@ function deterministicFallback(
       machines,
     },
   });
+  return standardizeResult(result, packet);
 }
 
 async function context() {
@@ -350,6 +357,12 @@ export async function GET() {
       }));
     return NextResponse.json({
       configured: Boolean(key),
+      providers: {
+        openrouter: Boolean(process.env.OPENROUTER_API_KEY),
+        lmstudio: Boolean(process.env.LM_STUDIO_BASE_URL || process.env.LM_STUDIO_API_KEY),
+        openai: Boolean(process.env.OPENAI_API_KEY),
+        openclaw: Boolean(process.env.OPENCLAW_BASE_URL && process.env.OPENCLAW_API_KEY),
+      },
       models: [
         {
           id: "openrouter/auto",
@@ -363,6 +376,12 @@ export async function GET() {
   } catch {
     return NextResponse.json({
       configured: Boolean(key),
+      providers: {
+        openrouter: Boolean(process.env.OPENROUTER_API_KEY),
+        lmstudio: Boolean(process.env.LM_STUDIO_BASE_URL || process.env.LM_STUDIO_API_KEY),
+        openai: Boolean(process.env.OPENAI_API_KEY),
+        openclaw: Boolean(process.env.OPENCLAW_BASE_URL && process.env.OPENCLAW_API_KEY),
+      },
       models: [
         {
           id: "openrouter/auto",
@@ -400,15 +419,6 @@ export async function POST(request: Request) {
       { error: "Dados da simulação inválidos." },
       { status: 400 },
     );
-  const key = process.env.OPENROUTER_API_KEY;
-  if (!key)
-    return NextResponse.json(
-      {
-        error:
-          "Integração com IA ainda não configurada no servidor. Cadastre uma nova OPENROUTER_API_KEY.",
-      },
-      { status: 503 },
-    );
   const settingsResult = await ctx.supabase.rpc(
     "local_get_planning_intelligence",
     { p_token: ctx.token },
@@ -426,12 +436,30 @@ export async function POST(request: Request) {
       { error: "Ative a análise por IA nos Critérios da nota AluPilot." },
       { status: 409 },
     );
+  let provider;
+  try {
+    provider = resolvePlanningAnalysisProvider(settings, process.env);
+  } catch (cause) {
+    return NextResponse.json(
+      { error: cause instanceof Error ? cause.message : "Provedor de IA inválido." },
+      { status: 503 },
+    );
+  }
+  if (provider.external && settings.aiExternalDataEnabled === false)
+    return NextResponse.json(
+      {
+        error:
+          "O envio para provedores externos está desativado. Ative essa permissão nos Critérios e analista IA ou escolha LM Studio local.",
+      },
+      { status: 409 },
+    );
   const requestHash = createHash("sha256")
     .update(
       JSON.stringify({
-        schemaVersion: 3,
+        schemaVersion: 4,
         packet: parsed.data,
-        model: settings.aiModel,
+        provider: provider.kind,
+        model: provider.model,
         personality: settings.aiPersonalityPrompt,
         criteria: settings.aiAnalysisCriteria,
       }),
@@ -442,16 +470,10 @@ export async function POST(request: Request) {
     { p_token: ctx.token, p_request_hash: requestHash },
   );
   if (cached.data) return NextResponse.json(cached.data);
-  const model =
-    settings.aiModelMode === "auto"
-      ? "openrouter/auto"
-      : String(settings.aiModel || "openrouter/auto");
+  const model = provider.model;
   const started = Date.now();
   try {
-    const modelAttempts =
-      settings.aiModelMode === "auto"
-        ? ["deepseek/deepseek-v4-flash-0731"]
-        : [model];
+    const modelAttempts = [model];
     let completed:
       | {
           result: z.infer<typeof aiResultSchema>;
@@ -463,43 +485,57 @@ export async function POST(request: Request) {
     for (const attemptedModel of modelAttempts) {
       try {
         const response = await fetch(
-          "https://openrouter.ai/api/v1/chat/completions",
+          `${provider.baseUrl}/chat/completions`,
           {
             method: "POST",
             signal: AbortSignal.timeout(55_000),
             headers: {
-              Authorization: `Bearer ${key}`,
+              ...(provider.apiKey
+                ? { Authorization: `Bearer ${provider.apiKey}` }
+                : {}),
               "Content-Type": "application/json",
-              "HTTP-Referer": process.env.APP_URL || "http://localhost:3000",
-              "X-OpenRouter-Title": "AluPilot",
+              ...(provider.kind === "openrouter"
+                ? {
+                    "HTTP-Referer": process.env.APP_URL || "http://localhost:3000",
+                    "X-OpenRouter-Title": "AluPilot",
+                  }
+                : {}),
             },
             body: JSON.stringify({
               model: attemptedModel,
               messages: [
                 {
                   role: "system",
-                  content: `${String(settings.aiPersonalityPrompt)}\n\nCRITÉRIOS CONFIGURÁVEIS:\n${String(settings.aiAnalysisCriteria)}\n\nPÚBLICO DA RESPOSTA: operadores, líderes e profissionais do chão de fábrica. Escreva para uma pessoa sem conhecimento de informática ou planejamento. Use português do Brasil, palavras comuns, frases curtas, tom respeitoso e instruções diretas. Explique siglas e termos técnicos quando forem indispensáveis. Não mostre nomes internos de campos, código JSON, camelCase, fórmulas, datas ISO ou textos como "score = 0". Converta 240 minutos em "4 horas" e apresente horários no formato brasileiro.\n\nFORMATO DE CADA ORIENTAÇÃO: o título deve começar com um verbo; plainExplanation explica o problema em linguagem simples; responsibleRole diz quem deve agir; steps contém ações curtas, concretas e na ordem correta; successCheck ensina como confirmar visualmente que o problema foi resolvido. evidence deve conter apenas fatos fáceis de entender.\n\nREGRAS DE SEGURANÇA: use somente os dados fornecidos; diferencie fato, inferência e dado ausente; nunca altere cálculos físicos; bloqueios determinísticos são soberanos; não invente estoques, tempos ou capacidades.`,
+                  content: `${OPERATOR_LANGUAGE_GUIDE}\n\n${String(settings.aiPersonalityPrompt)}\n\nCRITÉRIOS CONFIGURÁVEIS:\n${String(settings.aiAnalysisCriteria)}\n\nPÚBLICO DA RESPOSTA: operadores, líderes e profissionais do chão de fábrica. Escreva para uma pessoa sem conhecimento de informática ou planejamento. Use português do Brasil, palavras comuns, frases curtas, tom respeitoso e instruções diretas. Explique siglas e termos técnicos quando forem indispensáveis. Não mostre nomes internos de campos, código JSON, camelCase, fórmulas, datas ISO ou textos como "score = 0". Converta 240 minutos em "4 horas" e apresente horários no formato brasileiro.\n\nMETAS OBRIGATÓRIAS: quando o pacote trouxer decisionSystem.evaluation.shiftGoals, o resumo executivo deve informar a produção projetada em kg e toneladas, a produtividade da meta em kg/h e a base usada, se cada meta de turno foi atingida (25 t e 1.300 kg/h), quanto falta ou excede, a produtividade técnica, a operacional, a cobertura da carga, o NO_LOAD e os principais gargalos. Não invente valores: use somente shiftGoals e explique quando uma parada ou dado ainda não foi registrado.\n\nFORMATO DE CADA ORIENTAÇÃO: o título deve começar com um verbo; plainExplanation explica o problema em linguagem simples; responsibleRole diz quem deve agir; steps contém ações curtas, concretas e na ordem correta; successCheck ensina como confirmar visualmente que o problema foi resolvido. evidence deve conter apenas fatos fáceis de entender.\n\nREGRAS DE SEGURANÇA: use somente os dados fornecidos; diferencie fato, inferência e dado ausente; nunca altere cálculos físicos; bloqueios determinísticos são soberanos; não invente estoques, tempos ou capacidades.`,
                 },
                 {
                   role: "user",
-                  content: `Analise o pacote compacto desta simulação e produza no máximo ${Number(settings.aiMaxRecommendations) || 6} orientações priorizadas. A resposta precisa ser autoexplicativa: diga claramente o que está acontecendo, por que isso pode parar ou atrasar a produção, quem deve agir, o passo a passo e como conferir o resultado. Evite jargões e nunca copie nomes técnicos do pacote para o texto destinado ao usuário.\n\nAlém da análise, crie obrigatoriamente um cenário alternativo de sequenciamento para avaliação do PCP. Em proposedScenario, reorganize apenas os orderId existentes dentro da própria prensa; use cada orderId exatamente uma vez, não transfira ordens entre prensas e não invente ordens. Explique o cenário com linguagem simples. Dê preferência a ações que evitem parada das prensas, respeitando bloqueios físicos, carcaças, BOs, ligas, prazo, cobertura térmica, volume e produtividade. O cenário será recalculado pelo motor determinístico antes de poder ser aprovado.\n\n${JSON.stringify(parsed.data)}`,
+                  content: `Analise o pacote compacto desta simulação e produza no máximo ${Number(settings.aiMaxRecommendations) || 6} orientações priorizadas. A resposta precisa ser autoexplicativa: diga claramente o que está acontecendo, por que isso pode parar ou atrasar a produção, quem deve agir, o passo a passo e como conferir o resultado. Evite jargões e nunca copie nomes técnicos do pacote para o texto destinado ao usuário.\n\nAlém da análise, crie obrigatoriamente um cenário alternativo de sequenciamento para avaliação do PCP. Em proposedScenario, reorganize apenas os orderId existentes dentro da própria prensa; use cada orderId exatamente uma vez, não transfira ordens entre prensas e não invente ordens. Explique o cenário com linguagem simples. Dê preferência a ações que elevem produção por turno e kg/h sem ignorar bloqueios físicos, carcaças, BOs, ligas, prazo, cobertura térmica e material. O cenário será recalculado pelo motor determinístico antes de poder ser aprovado.\n\n${JSON.stringify(parsed.data)}`,
                 },
               ],
               temperature: 0.2,
               max_tokens: 3000,
-              provider: {
-                require_parameters: true,
-                allow_fallbacks: true,
-                data_collection: "deny",
-              },
-              response_format: {
-                type: "json_schema",
-                json_schema: {
-                  name: "alupilot_planning_analysis",
-                  strict: true,
-                  schema: outputSchema,
-                },
-              },
+              ...(provider.kind === "openrouter"
+                ? {
+                    provider: {
+                      require_parameters: true,
+                      allow_fallbacks: true,
+                      data_collection: "deny",
+                    },
+                  }
+                : {}),
+              ...(provider.supportsStrictSchema
+                ? {
+                    response_format: {
+                      type: "json_schema",
+                      json_schema: {
+                        name: "alupilot_planning_analysis",
+                        strict: true,
+                        schema: outputSchema,
+                      },
+                    },
+                  }
+                : { response_format: { type: "json_object" } }),
             }),
           },
         );
@@ -511,13 +547,13 @@ export async function POST(request: Request) {
         };
         if (!response.ok)
           throw new Error(
-            body.error?.message || `OpenRouter respondeu ${response.status}.`,
+            body.error?.message || `${provider.label} respondeu ${response.status}.`,
           );
         const content = body.choices?.[0]?.message?.content;
         if (!content)
           throw new Error("O modelo não devolveu conteúdo estruturado.");
-        const validated = normalizeProposedScenario(
-          aiResultSchema.parse(JSON.parse(content)),
+        const validated = standardizeResult(
+          normalizeProposedScenario(aiResultSchema.parse(JSON.parse(content)), parsed.data),
           parsed.data,
         );
         completed = {
@@ -528,7 +564,7 @@ export async function POST(request: Request) {
               Number(settings.aiMaxRecommendations) || 6,
             ),
           },
-          modelUsed: body.model ?? attemptedModel,
+          modelUsed: `${provider.label} · ${body.model ?? attemptedModel}`,
           usage: body.usage ?? {},
         };
         break;

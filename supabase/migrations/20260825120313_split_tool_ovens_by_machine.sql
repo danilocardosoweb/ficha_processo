@@ -38,6 +38,14 @@ update public.tool_heating_cycles c
    and target.machine_code = '19'
    and target.code = source.code;
 
+-- Bases novas podem não ter recebido o cadastro mínimo das prensas ainda.
+-- Garanta as duas prensas referenciadas pelos fornos antes de adicionar a FK.
+insert into public.machines (organization_id, code, name, is_active)
+values
+  ('8557a116-8377-44a6-b2f3-5b087f08bea8'::uuid, '18', 'Prensa 18', true),
+  ('8557a116-8377-44a6-b2f3-5b087f08bea8'::uuid, '19', 'Prensa 19', true)
+on conflict (organization_id, code) do nothing;
+
 alter table public.tool_ovens
   alter column machine_code set not null,
   add constraint tool_ovens_organization_machine_fkey

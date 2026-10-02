@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, BellRing, Boxes, ChartNoAxesCombined, ChevronLeft, ChevronRight, FileCog, Flame, Gauge, History, Import, Menu, PackageSearch, Settings, ShieldCheck, TimerReset, UnlockKeyhole, Wrench } from "lucide-react";
+import { BarChart3, BellRing, Boxes, ChartNoAxesCombined, ChevronLeft, ChevronRight, FileBarChart, FileCog, Flame, Gauge, History, Import, Menu, Settings, ShieldCheck, TimerReset, UnlockKeyhole, Wrench, NotebookTabs } from "lucide-react";
 import { BrandMark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -14,18 +14,19 @@ import { canAccess, type AccessArea } from "@/lib/access-control";
 const navigationGroups = [
   { label: "Operação", items: [
     { label: "Visão geral", href: "/dashboard", icon: Gauge, permission: "dashboard" },
-    { label: "Produção", href: "/producao", icon: Boxes, permission: "production" },
-    { label: "Ordens e planos", href: "/ordens", icon: PackageSearch, permission: "orders" },
-    { label: "Importar simplificada", href: "/importar", icon: Import, permission: "import" },
-    { label: "Forno de ferramentas", href: "/forno", icon: Flame, permission: "oven" },
-    { label: "Carteira e planejamento", href: "/planejamento", icon: ChartNoAxesCombined, permission: "planning" },
     { label: "Carga Máquina", href: "/carga-maquina", icon: TimerReset, permission: "simulation" },
+    { label: "Forno de ferramentas", href: "/forno", icon: Flame, permission: "oven" },
+    { label: "Produção", href: "/producao", icon: Boxes, permission: "production" },
+    { label: "Report da Produção", href: "/diario-bordo", icon: NotebookTabs, permission: "diary" },
+    { label: "Carteira e planejamento", href: "/planejamento", icon: ChartNoAxesCombined, permission: "planning" },
   ] },
   { label: "Acompanhamento", items: [
+    { label: "Importar simplificada", href: "/importar", icon: Import, permission: "import" },
     { label: "Engenharia", href: "/engenharia", icon: FileCog, permission: "engineering" },
     { label: "Manutenção", href: "/manutencao", icon: Wrench, permission: "maintenance" },
     { label: "Qualidade", href: "/qualidade", icon: ShieldCheck, permission: "quality" },
     { label: "Indicadores", href: "/indicadores", icon: BarChart3, permission: "indicators" },
+    { label: "Relatórios", href: "/relatorios", icon: FileBarChart, permission: "reports" },
     { label: "Avisos operacionais", href: "/mensagens", icon: BellRing, permission: "messages" },
     { label: "Auditoria", href: "/configuracoes/auditoria", icon: History, permission: "audit" },
   ] },

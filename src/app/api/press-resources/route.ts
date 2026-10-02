@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getSessionToken } from "@/lib/local-auth/server";
+import { isDevelopmentSession } from "@/lib/local-auth/development";
 import { createClient } from "@/lib/supabase/server";
 
 const schema = z.object({
@@ -23,6 +24,10 @@ async function context() {
 export async function GET() {
   const ctx = await context();
   if (!ctx) return NextResponse.json({ error: "Sessão encerrada." }, { status: 401 });
+  if (isDevelopmentSession(ctx.token)) {
+    const seed: Array<[string, number]> = [["200X170", 2], ["227X170", 1], ["228X130", 14], ["228X170", 5], ["250X170", 24], ["300X170", 8], ["300X209", 1], ["357X170", 1]];
+    return NextResponse.json(seed.map(([carcassCode, totalQuantity]) => ({ id: `dev-carcass-${carcassCode}`, machineCode: "SHARED", sharedAcrossMachines: true, carcassCode, totalQuantity, unavailableQuantity: 0, reservedQuantity: 0, availableQuantity: totalQuantity, status: "available", location: "Estoque inicial", notes: "Modo de desenvolvimento" })));
+  }
   const { data, error } = await ctx.supabase.rpc("local_list_press_carcass_resources", { p_token: ctx.token });
   if (error) return NextResponse.json({ error: error.message }, { status: 400 });
   return NextResponse.json(Array.isArray(data) ? data : []);
@@ -31,6 +36,7 @@ export async function GET() {
 export async function POST(request: Request) {
   const ctx = await context();
   if (!ctx) return NextResponse.json({ error: "Sessão encerrada." }, { status: 401 });
+  if (isDevelopmentSession(ctx.token)) return NextResponse.json({ error: "O modo de desenvolvimento exibe o estoque inicial em modo somente leitura. Entre com um usuário persistente para alterar." }, { status: 403 });
   const parsed = schema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message || "Revise os dados." }, { status: 400 });
   const value = parsed.data;

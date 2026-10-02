@@ -1,4 +1,5 @@
 import type { LoadSimulation } from "./machine-load-simulator";
+import { dueAt } from "./decision-system/dates";
 
 export interface IntelligenceWeights {
   thermal: number;
@@ -13,6 +14,9 @@ export interface IntelligenceWeights {
   maxConsecutiveHighHoleTools: number;
   lowVolumeThresholdKg: number;
   aiEnabled: boolean;
+  aiProvider: "openrouter" | "lmstudio" | "openai" | "openclaw";
+  aiProviderEndpoint: string;
+  aiExternalDataEnabled: boolean;
   aiModelMode: "auto" | "manual";
   aiModel: string;
   aiPersonalityPrompt: string;
@@ -91,6 +95,9 @@ export const defaultIntelligenceWeights: IntelligenceWeights = {
   maxConsecutiveHighHoleTools: 2,
   lowVolumeThresholdKg: 300,
   aiEnabled: false,
+  aiProvider: "openrouter",
+  aiProviderEndpoint: "",
+  aiExternalDataEnabled: true,
   aiModelMode: "auto",
   aiModel: "openrouter/auto",
   aiPersonalityPrompt:
@@ -144,12 +151,10 @@ export function analyzePlanning(
       (stockByAlloy.get(normalized(billet.alloyCode))?.availableBars ?? 0),
   );
   const lateItems = items.filter(
-    (item) => item.dueDate && item.endAt > new Date(`${item.dueDate}T23:59:59`),
+    (item) => dueAt(item.dueDate) && item.endAt > dueAt(item.dueDate)!,
   );
-  const totalElapsed = simulation.machines.reduce(
-    (sum, machine) => sum + machine.simulatedMinutes,
-    0,
-  );
+  const totalElapsed = items.reduce((sum, item) =>
+    sum + item.theoreticalMinutes + item.preparationMinutes + item.thermalWaitMinutes + item.resourceWaitMinutes, 0);
   const productive = simulation.machines.reduce(
     (sum, machine) => sum + machine.theoreticalMinutes,
     0,
@@ -425,7 +430,7 @@ export function analyzePlanning(
       category: "flow",
       title: "Diminuir trocas e esperas da prensa",
       reason: `${Math.round(flowLossRatio * 100)}% do tempo previsto está em preparação, troca ou espera.`,
-      impact: `A prensa pode recuperar aproximadamente ${Math.round(totalElapsed - productive)} min de produção.`,
+      impact: `Há ${Math.round(totalElapsed - productive)} min em preparação e espera dentro do turno. Simule uma alternativa para medir a parte que pode ser reduzida.`,
       action:
         "Juntar ordens de ligas compatíveis e diminuir trocas sem prejudicar prazo ou aquecimento.",
       responsibleRole: "PCP e líder da prensa",

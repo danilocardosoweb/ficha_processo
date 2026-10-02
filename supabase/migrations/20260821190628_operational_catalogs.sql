@@ -66,6 +66,17 @@ create index if not exists machine_stoppages_reason_catalog_idx
   on public.machine_stoppages (reason_catalog_id)
   where reason_catalog_id is not null;
 
+-- A base nova ainda não possui a organização fixa usada pelo modo V1.
+-- Criar o registro aqui torna a migração idempotente e evita falha de FK
+-- quando os catálogos iniciais forem carregados.
+insert into public.organizations (id, name, slug)
+values (
+  '8557a116-8377-44a6-b2f3-5b087f08bea8'::uuid,
+  'AlumMES',
+  'alummes'
+)
+on conflict (id) do nothing;
+
 insert into public.operational_catalogs (
   organization_id, catalog_type, code, label, group_code,
   responsible_department, routes_to_maintenance, sort_order, metadata

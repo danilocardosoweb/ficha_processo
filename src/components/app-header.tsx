@@ -11,6 +11,7 @@ import type { LocalUser } from "@/lib/local-auth/types";
 import { roleLabels, userInitials } from "@/lib/local-auth/types";
 import { useOperationalMessages } from "@/components/operational-messages-provider";
 import { canAccess } from "@/lib/access-control";
+import { AluPilotAssistant } from "@/components/alupilot-assistant";
 
 export function AppHeader({ user }: { user: LocalUser }) {
   const router = useRouter();
@@ -22,9 +23,10 @@ export function AppHeader({ user }: { user: LocalUser }) {
     router.refresh();
   }
   return (
-    <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b bg-white/95 px-4 backdrop-blur md:px-8">
+    <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b bg-white/95 px-4 backdrop-blur lg:px-6 min-[1440px]:px-8">
       <div className="flex items-center gap-3"><MobileNav /><OfflineStatus /></div>
       <div className="flex items-center gap-2">
+        <AluPilotAssistant />
         <Button variant="ghost" size="icon" className="relative text-slate-500" aria-label={`Notificações${unreadCount ? `: ${unreadCount} não lidas` : ""}`} onClick={() => setOpen(true)}>
           <Bell className="size-5" />{unreadCount > 0 && <span className="absolute right-0.5 top-0.5 grid min-w-4 place-items-center rounded-full bg-orange-500 px-1 text-[9px] font-bold leading-4 text-white">{unreadCount > 9 ? "9+" : unreadCount}</span>}
         </Button>

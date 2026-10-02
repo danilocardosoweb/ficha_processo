@@ -1,5 +1,12 @@
 export const DEFAULT_PRODUCTIVITY_KG_H = 1_300;
 export const MAX_PRODUCTIVITY_KG_H = 2_500;
+export const MIN_SPECIAL_ALLOY_PRODUCTIVITY_KG_H = 450;
+const COMMON_ALLOY_MINIMUM_KG_H = 1_000;
+
+// Classificação oficial informada pela operação. Somente estas ligas podem
+// conservar uma produtividade reduzida; as demais usam o padrão seguro quando
+// o histórico vier baixo, zerado ou contaminado por erro de importação.
+const SPECIAL_ALLOY_PATTERN = /(?:^|[^0-9])(6351|6005|6082|6061)(?:$|[^0-9])/i;
 
 function parseProductivityToken(value: unknown): number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -28,4 +35,15 @@ export function normalizeProductivityKgH(value: unknown): number | null {
 
 export function safeProductivityKgH(value: unknown): number {
   return normalizeProductivityKgH(value) ?? DEFAULT_PRODUCTIVITY_KG_H;
+}
+
+export function guardProductivityKgH(value: unknown, alloyCode: unknown): number {
+  const normalized = normalizeProductivityKgH(value);
+  if (normalized === null) return DEFAULT_PRODUCTIVITY_KG_H;
+  const alloy = String(alloyCode ?? "").trim();
+  if (SPECIAL_ALLOY_PATTERN.test(alloy))
+    return Math.max(MIN_SPECIAL_ALLOY_PRODUCTIVITY_KG_H, normalized);
+  return normalized < COMMON_ALLOY_MINIMUM_KG_H
+    ? DEFAULT_PRODUCTIVITY_KG_H
+    : normalized;
 }

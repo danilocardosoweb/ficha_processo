@@ -1,6 +1,8 @@
-import { safeProductivityKgH } from "@/modules/planning/productivity";
+import { guardProductivityKgH } from "@/modules/planning/productivity";
+import { dueAt } from "@/modules/planning/decision-system/dates";
 
 export type ProductivitySource = "simplificada" | "aprendizado" | "ficha" | "ferramenta" | "padrao";
+export type FurnaceTimelineState = "released" | "heating" | "ready_waiting" | "planned";
 
 export interface LoadOrderInput {
   id: string;
@@ -19,6 +21,10 @@ export interface LoadOrderInput {
   productivitySource: ProductivitySource;
   toolReadyAt: Date | null;
   toolHeatingState: "released" | "heating" | "waiting";
+  /** Reserva física vinda do ciclo real de forno, quando houver. */
+  toolOvenCode?: string | null;
+  toolOvenPosition?: number | null;
+  toolHeatingEnteredAt?: Date | null;
   /** Physical extrusion holes. Tracked now; rule influence will be versioned later. */
   holes?: number | null;
   /** BO físico compartilhado entre as prensas. */
@@ -27,6 +33,9 @@ export interface LoadOrderInput {
   carcassDiameterMm?: number | null;
   carcassCode?: string | null;
   carcassQuantity?: number;
+  /** Ciclo morto e espera de mão de obra, quando vierem do apontamento real. */
+  deadCycleMinutes?: number | null;
+  laborWaitMinutes?: number | null;
 }
 
 export interface WorkShiftInput {
@@ -40,6 +49,17 @@ export interface WorkShiftInput {
   isActive: boolean;
 }
 
+/** A janela de hora extra é pontual: ela não cria nem altera um turno recorrente. */
+export interface OvertimePeriodInput {
+  id: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  machineCodes: string[];
+  reason: string;
+  isActive: boolean;
+}
+
 export interface ResourceUnavailabilityInput {
   id: string;
   resourceType: "press" | "oven" | "tool" | "carcass" | "bo";
@@ -48,6 +68,8 @@ export interface ResourceUnavailabilityInput {
   endsAt: Date;
   reason: string;
   status: "active" | "cancelled";
+  /** Quando conhecido, evita inferir parada planejada a partir do texto. */
+  stopCategory?: "PLANNED_STOP" | "UNPLANNED_STOP";
 }
 
 export interface MachineLoadSettings {
@@ -56,6 +78,8 @@ export interface MachineLoadSettings {
   defaultProductivityKgH: number;
   setupMinutes: number;
   alloyChangeMinutes: number;
+  /** Tempo morto entre duas ferramentas consecutivas. Não substitui o preparo físico. */
+  toolChangeMinutes?: number;
   toolHeatingMinutes: number;
   ovenCount: number;
   ovenSlotsPerOven: number;
@@ -109,6 +133,12 @@ export interface ScheduledLoadItem extends LoadOrderInput {
   theoreticalMinutes: number;
   waitingMinutes: number;
   preparationMinutes: number;
+  /** Preparação inicial aplicada uma vez antes da primeira ferramenta da prensa. */
+  initialPreparationMinutes: number;
+  /** Tempo adicional quando há mudança de liga entre duas ferramentas. */
+  alloyChangeMinutes: number;
+  /** Tempo morto aplicado entre duas ferramentas consecutivas. */
+  toolChangeMinutes: number;
   billetRequiredKg: number;
   billetBarsLoaded: number;
   billetBalanceBeforeKg: number;
@@ -118,6 +148,13 @@ export interface ScheduledLoadItem extends LoadOrderInput {
   calculatedToolReadyAt: Date;
   latestHeatingStartAt: Date;
   ovenSlotNumber: number | null;
+  ovenCode: string | null;
+  ovenPosition: number | null;
+  /** A vaga permanece ocupada até a retirada confirmada no início da extrusão. */
+  toolOvenExitAt: Date | null;
+  /** Tempo físico em que a ferramenta já pronta permanece aguardando na posição. */
+  readyWaitingMinutes: number;
+  furnaceState: FurnaceTimelineState;
   thermalWaitMinutes: number;
   resourceWaitMinutes: number;
   resourceConflicts: SimulationConflict[];
@@ -171,6 +208,10 @@ export interface LoadSimulation {
   totalBars: number;
   conflicts: SimulationConflict[];
   feasible: boolean;
+  /** Calendário físico usado pela simulação, para auditoria de disponibilidade. */
+  unavailable?: ResourceUnavailabilityInput[];
+  shifts?: WorkShiftInput[];
+  overtimePeriods?: OvertimePeriodInput[];
 }
 
 const minute = 60_000;
@@ -178,13 +219,14 @@ const normalizedAlloy = (value: string) => value.trim().toUpperCase() || "SEM LI
 
 interface WorkWindow { start: Date; end: Date; }
 interface ReservedInterval { start: Date; end: Date; quantity: number; orderId?: string | null; }
+interface OvenSlotState { slot: number; ovenNumber: number; position: number; code: string; availableAt: Date; }
 
 const timeParts = (value: string) => {
   const [hours, minutes] = value.slice(0, 5).split(":").map(Number);
   return { hours: hours || 0, minutes: minutes || 0 };
 };
 
-function workWindows(from: Date, shifts: WorkShiftInput[], machineCode: string, horizonDays = 14, unavailable: ResourceUnavailabilityInput[] = []) {
+function workWindows(from: Date, shifts: WorkShiftInput[], machineCode: string, horizonDays = 14, unavailable: ResourceUnavailabilityInput[] = [], overtimePeriods: OvertimePeriodInput[] = []) {
   const applicable = shifts.filter((shift) => shift.isActive && (!shift.machineCodes.length || shift.machineCodes.includes(machineCode)));
   const windows: WorkWindow[] = [];
   const firstDay = new Date(from.getFullYear(), from.getMonth(), from.getDate() - 1);
@@ -199,6 +241,19 @@ function workWindows(from: Date, shifts: WorkShiftInput[], machineCode: string, 
       end.setMinutes(end.getMinutes() - Math.max(shift.breakMinutes, 0));
       if (end > start) windows.push({ start, end });
     }
+  }
+  for (const overtime of overtimePeriods) {
+    if (!overtime.isActive || (overtime.machineCodes.length && !overtime.machineCodes.includes(machineCode))) continue;
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(overtime.date);
+    if (!match) continue;
+    const base = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    if (base < firstDay || base > new Date(firstDay.getFullYear(), firstDay.getMonth(), firstDay.getDate() + horizonDays + 1)) continue;
+    const startPart = timeParts(overtime.startTime);
+    const endPart = timeParts(overtime.endTime);
+    const start = new Date(base.getFullYear(), base.getMonth(), base.getDate(), startPart.hours, startPart.minutes);
+    const end = new Date(base.getFullYear(), base.getMonth(), base.getDate(), endPart.hours, endPart.minutes);
+    if (end <= start) end.setDate(end.getDate() + 1);
+    windows.push({ start, end });
   }
   windows.sort((left, right) => left.start.getTime() - right.start.getTime());
   const merged = windows.reduce<WorkWindow[]>((result, window) => {
@@ -218,30 +273,30 @@ function workWindows(from: Date, shifts: WorkShiftInput[], machineCode: string, 
   }), merged);
 }
 
-export function nextWorkingInstant(at: Date, shifts: WorkShiftInput[], machineCode: string, unavailable: ResourceUnavailabilityInput[] = []) {
-  const window = workWindows(at, shifts, machineCode, 14, unavailable).find((item) => at < item.end);
+export function nextWorkingInstant(at: Date, shifts: WorkShiftInput[], machineCode: string, unavailable: ResourceUnavailabilityInput[] = [], overtimePeriods: OvertimePeriodInput[] = []) {
+  const window = workWindows(at, shifts, machineCode, 14, unavailable, overtimePeriods).find((item) => at < item.end);
   if (!window) throw new Error(`Não há turno ativo disponível para a prensa ${machineCode}.`);
   return new Date(Math.max(at.getTime(), window.start.getTime()));
 }
 
-export function addWorkingMinutes(at: Date, minutesToAdd: number, shifts: WorkShiftInput[], machineCode: string, unavailable: ResourceUnavailabilityInput[] = []) {
-  let cursor = nextWorkingInstant(at, shifts, machineCode, unavailable);
+export function addWorkingMinutes(at: Date, minutesToAdd: number, shifts: WorkShiftInput[], machineCode: string, unavailable: ResourceUnavailabilityInput[] = [], overtimePeriods: OvertimePeriodInput[] = []) {
+  let cursor = nextWorkingInstant(at, shifts, machineCode, unavailable, overtimePeriods);
   let remaining = Math.max(minutesToAdd, 0);
   for (let guard = 0; remaining > 0 && guard < 1_000; guard += 1) {
-    const window = workWindows(cursor, shifts, machineCode, 14, unavailable).find((item) => cursor >= item.start && cursor < item.end);
-    if (!window) { cursor = nextWorkingInstant(cursor, shifts, machineCode, unavailable); continue; }
+    const window = workWindows(cursor, shifts, machineCode, 14, unavailable, overtimePeriods).find((item) => cursor >= item.start && cursor < item.end);
+    if (!window) { cursor = nextWorkingInstant(cursor, shifts, machineCode, unavailable, overtimePeriods); continue; }
     const available = (window.end.getTime() - cursor.getTime()) / minute;
     if (remaining <= available) return new Date(cursor.getTime() + remaining * minute);
     remaining -= available;
-    cursor = nextWorkingInstant(new Date(window.end.getTime() + 1), shifts, machineCode, unavailable);
+    cursor = nextWorkingInstant(new Date(window.end.getTime() + 1), shifts, machineCode, unavailable, overtimePeriods);
   }
   if (remaining <= 0) return cursor;
   throw new Error(`Não foi possível calcular os turnos da prensa ${machineCode}.`);
 }
 
-function workingMinutesBetween(from: Date, to: Date, shifts: WorkShiftInput[], machineCode: string, unavailable: ResourceUnavailabilityInput[] = []) {
+export function workingMinutesBetween(from: Date, to: Date, shifts: WorkShiftInput[], machineCode: string, unavailable: ResourceUnavailabilityInput[] = [], overtimePeriods: OvertimePeriodInput[] = []) {
   if (to <= from) return 0;
-  return workWindows(from, shifts, machineCode, 30, unavailable).reduce((total, window) => {
+  return workWindows(from, shifts, machineCode, Math.ceil((to.getTime() - from.getTime()) / 86400000) + 1, unavailable, overtimePeriods).reduce((total, window) => {
     const start = Math.max(from.getTime(), window.start.getTime());
     const end = Math.min(to.getTime(), window.end.getTime());
     return total + Math.max(end - start, 0) / minute;
@@ -285,7 +340,7 @@ function peakHeatingOccupation(items: ScheduledLoadItem[]) {
   for (const item of items) {
     if (!item.toolHeatingStartAt || item.toolHeatingState === "released") continue;
     const key = `${item.toolCode.trim().toUpperCase()}-${item.toolHeatingStartAt.getTime()}-${item.calculatedToolReadyAt.getTime()}`;
-    uniqueWindows.set(key, { start: item.toolHeatingStartAt, end: item.calculatedToolReadyAt });
+    uniqueWindows.set(key, { start: item.toolHeatingStartAt, end: item.toolOvenExitAt ?? item.extrusionStartAt });
   }
   const events = [...uniqueWindows.values()].flatMap((window) => [
     { time: window.start.getTime(), change: 1 },
@@ -344,14 +399,61 @@ function chooseAlloy(
   const candidates = [order.alloyCode, ...order.alternativeAlloys]
     .map(normalizedAlloy)
     .filter((value, index, values) => values.indexOf(value) === index);
+  const priority = new Map(candidates.map((candidate, index) => [candidate, index]));
   const required = Math.max(order.targetKg - order.producedKg, 0) / settings.extrusionEfficiency;
-  return candidates.sort((left, right) => {
+  return [...candidates].sort((left, right) => {
     const leftDeficit = Math.max(required - (balances.get(left) ?? 0), 0);
     const rightDeficit = Math.max(required - (balances.get(right) ?? 0), 0);
     const leftBars = Math.ceil(leftDeficit / settings.billetBarWeightKg);
     const rightBars = Math.ceil(rightDeficit / settings.billetBarWeightKg);
-    return leftBars - rightBars || candidates.indexOf(left) - candidates.indexOf(right);
+    return leftBars - rightBars || priority.get(left)! - priority.get(right)!;
   })[0] ?? "SEM LIGA";
+}
+
+function globalMaterialChoices(
+  simulation: LoadSimulation,
+  orders: LoadOrderInput[],
+  settingsByMachine: Record<string, MachineLoadSettings>,
+) {
+  const ordersById = new Map(orders.map((order) => [order.id, order]));
+  const balances = new Map<string, number>();
+  const choices = new Map<string, string>();
+  const chronologicalItems = simulation.machines
+    .flatMap((machine) => machine.items)
+    .sort(
+      (left, right) =>
+        left.extrusionStartAt.getTime() - right.extrusionStartAt.getTime() ||
+        left.id.localeCompare(right.id),
+    );
+
+  for (const item of chronologicalItems) {
+    const order = ordersById.get(item.id);
+    const settings = settingsByMachine[item.machineCode] ?? Object.values(settingsByMachine)[0];
+    if (!order || !settings) continue;
+    const selectedAlloy = chooseAlloy(order, balances, settings);
+    const before = balances.get(selectedAlloy) ?? 0;
+    const bars = Math.ceil(
+      Math.max(item.billetRequiredKg - before, 0) / settings.billetBarWeightKg,
+    );
+    const after = Math.max(
+      before + bars * settings.billetBarWeightKg - item.billetRequiredKg,
+      0,
+    );
+    choices.set(item.id, selectedAlloy);
+    balances.set(selectedAlloy, after);
+  }
+  return choices;
+}
+
+function sameMaterialChoices(
+  left: Map<string, string>,
+  right: Map<string, string>,
+) {
+  if (left.size !== right.size) return false;
+  for (const [id, alloy] of left) {
+    if (right.get(id) !== alloy) return false;
+  }
+  return true;
 }
 
 function optimizedQueue(orders: LoadOrderInput[]) {
@@ -364,8 +466,8 @@ function optimizedQueue(orders: LoadOrderInput[]) {
       const bestReady = remaining[best].toolHeatingState === "released" ? 0 : remaining[best].toolHeatingState === "heating" ? 1 : 2;
       const currentSame = normalizedAlloy(current.alloyCode) === lastAlloy ? 0 : 1;
       const bestSame = normalizedAlloy(remaining[best].alloyCode) === lastAlloy ? 0 : 1;
-      const currentDue = current.dueDate ? new Date(`${current.dueDate}T12:00:00`).getTime() : Number.MAX_SAFE_INTEGER;
-      const bestDue = remaining[best].dueDate ? new Date(`${remaining[best].dueDate}T12:00:00`).getTime() : Number.MAX_SAFE_INTEGER;
+      const currentDue = dueAt(current.dueDate)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      const bestDue = dueAt(remaining[best].dueDate)?.getTime() ?? Number.MAX_SAFE_INTEGER;
       const comparison = currentReady - bestReady || currentSame - bestSame || currentDue - bestDue || current.sequence - remaining[best].sequence;
       return comparison < 0 ? index : best;
     }, 0);
@@ -376,7 +478,7 @@ function optimizedQueue(orders: LoadOrderInput[]) {
   return result;
 }
 
-export function simulateMachineLoad(
+function simulateMachineLoadPass(
   orders: LoadOrderInput[],
   settingsByMachine: Record<string, MachineLoadSettings>,
   startedAt: Date,
@@ -384,6 +486,8 @@ export function simulateMachineLoad(
   shifts: WorkShiftInput[] = [],
   unavailable: ResourceUnavailabilityInput[] = [],
   resources: SimulationResourcesInput = { carcasses: [], bos: [] },
+  overtimePeriods: OvertimePeriodInput[] = [],
+  forcedAlloys: Map<string, string> | null = null,
 ): LoadSimulation {
   if (!shifts.some((shift) => shift.isActive)) throw new Error("Cadastre pelo menos um turno ativo para calcular a Carga Máquina.");
   const balances = new Map<string, number>();
@@ -404,12 +508,24 @@ export function simulateMachineLoad(
 
   for (const [machineCode, machineOrders] of machineGroups) {
     const settings = settingsByMachine[machineCode] ?? Object.values(settingsByMachine)[0];
+    if (!settings || !Number.isFinite(settings.extrusionEfficiency) || settings.extrusionEfficiency <= 0 || settings.extrusionEfficiency > 1 ||
+        !Number.isFinite(settings.billetBarWeightKg) || settings.billetBarWeightKg <= 0)
+      throw new Error(`Revise eficiência e peso da barra da prensa ${machineCode} antes de simular.`);
     const queue = mode === "optimized" ? optimizedQueue(machineOrders) : [...machineOrders].sort((a, b) => a.sequence - b.sequence);
-    let pressAvailable = nextWorkingInstant(startedAt, shifts, machineCode, unavailable);
+    let pressAvailable = nextWorkingInstant(startedAt, shifts, machineCode, unavailable, overtimePeriods);
     let previousAlloy = "";
     const toolAvailability = new Map<string, Date>();
-    const configuredOvenSlots = Math.max(settings.ovenCount || 1, 1) * Math.max(settings.ovenSlotsPerOven || settings.ovenSlots || 1, 1);
-    const ovenSlots = Array.from({ length: Math.max(settings.ovenSlots || configuredOvenSlots, 1) }, () => new Date(startedAt));
+    const positionsPerOven = Math.max(settings.ovenSlotsPerOven || settings.ovenSlots || 1, 1);
+    const configuredOvenSlots = Math.max(settings.ovenCount || 1, 1) * positionsPerOven;
+    const slotCount = Math.max(settings.ovenSlots || configuredOvenSlots, 1);
+    // Cada vaga é um recurso físico reutilizável: forno + posição, e não um
+    // contador da fila. A reserva termina somente quando a ferramenta sai
+    // para iniciar a extrusão.
+    const ovenSlots: OvenSlotState[] = Array.from({ length: slotCount }, (_, index) => {
+      const ovenNumber = Math.floor(index / positionsPerOven) + 1;
+      const position = index % positionsPerOven + 1;
+      return { slot: index + 1, ovenNumber, position, code: `F${ovenNumber}`, availableAt: new Date(startedAt) };
+    });
     const toolHeatingAllocation = new Map<string, { start: Date; ready: Date; slot: number }>();
     const items: ScheduledLoadItem[] = [];
 
@@ -422,44 +538,62 @@ export function simulateMachineLoad(
       const current = activeHeatingTools.get(key);
       if (!current || order.toolReadyAt > current) activeHeatingTools.set(key, order.toolReadyAt);
     }
+    if (activeHeatingTools.size > ovenSlots.length)
+      throw new Error(`A prensa ${machineCode} tem mais ferramentas aquecendo do que vagas cadastradas. Confira os ciclos do forno.`);
     [...activeHeatingTools.entries()].sort((left, right) => left[1].getTime() - right[1].getTime()).forEach(([toolKey, ready], index) => {
-      const slotIndex = index % ovenSlots.length;
+      const linkedOrder = queue.find(order => order.toolCode.trim().toUpperCase() === toolKey);
+      const requestedCode = linkedOrder?.toolOvenCode?.trim().toUpperCase() ?? "";
+      const requestedPosition = linkedOrder?.toolOvenPosition ?? null;
+      const slotIndex = ovenSlots.findIndex(slot => slot.code === requestedCode && slot.position === requestedPosition && slot.availableAt.getTime() <= startedAt.getTime());
+      const resolvedIndex = slotIndex >= 0 ? slotIndex : index % ovenSlots.length;
+      const slot = ovenSlots[resolvedIndex];
       const heatingStart = new Date(ready.getTime() - settings.toolHeatingMinutes * minute);
-      ovenSlots[slotIndex] = ready > ovenSlots[slotIndex] ? ready : ovenSlots[slotIndex];
+      slot.availableAt = ready > slot.availableAt ? ready : slot.availableAt;
       toolAvailability.set(toolKey, ready);
-      toolHeatingAllocation.set(toolKey, { start: heatingStart, ready, slot: slotIndex + 1 });
+      toolHeatingAllocation.set(toolKey, { start: linkedOrder?.toolHeatingEnteredAt ?? heatingStart, ready, slot: slot.slot });
     });
 
     for (const order of queue) {
       const remainingKg = Math.max(order.targetKg - order.producedKg, 0);
       if (remainingKg <= 0) continue;
-      const productivityKgH = safeProductivityKgH(order.productivityKgH);
+      const productivityKgH = guardProductivityKgH(order.productivityKgH, order.alloyCode);
       const toolKey = order.toolCode.trim().toUpperCase();
       let readyAt = toolAvailability.get(toolKey) ?? order.toolReadyAt;
       let allocation = toolHeatingAllocation.get(toolKey) ?? null;
       if (!readyAt) {
-        const slotIndex = ovenSlots.reduce((best, value, index) => value < ovenSlots[best] ? index : best, 0);
-        let heatingStartAt = new Date(Math.max(ovenSlots[slotIndex].getTime(), startedAt.getTime()));
+        const slotIndex = ovenSlots.reduce((best, value, index) => value.availableAt < ovenSlots[best].availableAt ? index : best, 0);
+        const slot = ovenSlots[slotIndex];
+        // Ferramenta simulada não deve entrar no forno assim que o cenário abre.
+        // A entrada é planejada o mais perto possível da necessidade da prensa;
+        // só antecipa quando a vaga do forno ou uma indisponibilidade exigirem.
+        const neededAt = new Date(Math.max(pressAvailable.getTime() - settings.toolHeatingMinutes * minute, startedAt.getTime()));
+        let heatingStartAt = new Date(Math.max(slot.availableAt.getTime(), neededAt.getTime()));
         readyAt = new Date(heatingStartAt.getTime() + settings.toolHeatingMinutes * minute);
-        const ovenNumber = Math.floor(slotIndex / Math.max(settings.ovenSlotsPerOven || settings.ovenSlots, 1)) + 1;
-        const ovenCodes = [machineCode, `${machineCode}:${ovenNumber}`, `FORNO-${machineCode}-${ovenNumber}`];
+        const ovenCodes = [machineCode, slot.code, `${machineCode}:${slot.ovenNumber}`, `FORNO-${machineCode}-${slot.ovenNumber}`];
         for (let guard = 0; guard < 20; guard += 1) {
           const block = unavailable.filter((period) => period.status === "active" && period.resourceType === "oven" && ovenCodes.includes(period.resourceCode.trim().toUpperCase()) && period.endsAt > heatingStartAt && period.startsAt < readyAt!).sort((left, right) => left.endsAt.getTime() - right.endsAt.getTime())[0];
           if (!block) break;
           heatingStartAt = new Date(block.endsAt.getTime() + 1);
           readyAt = new Date(heatingStartAt.getTime() + settings.toolHeatingMinutes * minute);
         }
-        ovenSlots[slotIndex] = readyAt;
-        allocation = { start: heatingStartAt, ready: readyAt, slot: slotIndex + 1 };
+        slot.availableAt = readyAt;
+        allocation = { start: heatingStartAt, ready: readyAt, slot: slot.slot };
         toolHeatingAllocation.set(toolKey, allocation);
       }
       toolAvailability.set(toolKey, readyAt);
       const pressReadyAt = new Date(pressAvailable);
-      let resourceReady = nextWorkingInstant(new Date(Math.max(pressReadyAt.getTime(), readyAt.getTime())), shifts, machineCode, unavailable);
+      let resourceReady = nextWorkingInstant(new Date(Math.max(pressReadyAt.getTime(), readyAt.getTime())), shifts, machineCode, unavailable, overtimePeriods);
       const latestHeatingStartAt = new Date(pressReadyAt.getTime() - settings.toolHeatingMinutes * minute);
-      const selectedAlloy = chooseAlloy(order, balances, settings);
+      const selectedAlloy = forcedAlloys
+        ? forcedAlloys.get(order.id) ?? normalizedAlloy(order.alloyCode)
+        : chooseAlloy(order, balances, settings);
       const alloyChange = previousAlloy && previousAlloy !== selectedAlloy ? settings.alloyChangeMinutes : 0;
-      const preparationMinutes = settings.setupMinutes + alloyChange;
+      // A preparação inicial ocorre uma única vez. Depois disso, cada mudança
+      // de ferramenta usa o tempo morto configurado (padrão: 1 min), somado
+      // apenas ao tempo de troca de liga quando ela realmente acontece.
+      const initialPreparationMinutes = items.length === 0 ? Math.max(0, settings.setupMinutes) : 0;
+      const toolChangeMinutes = items.length > 0 ? Math.max(0, settings.toolChangeMinutes ?? 1) : 0;
+      const preparationMinutes = initialPreparationMinutes + toolChangeMinutes + alloyChange;
       const theoreticalMinutes = (remainingKg / productivityKgH) * 60;
       const itemConflicts: SimulationConflict[] = [];
       const carcassKey = order.carcassCode ? normalizedAlloy(order.carcassCode) : "";
@@ -483,8 +617,8 @@ export function simulateMachineLoad(
       }
 
       const resourceWaitStartedAt = new Date(resourceReady);
-      let extrusionStartAt = addWorkingMinutes(resourceReady, preparationMinutes, shifts, machineCode, unavailable);
-      let endAt = addWorkingMinutes(extrusionStartAt, theoreticalMinutes, shifts, machineCode, unavailable);
+      let extrusionStartAt = addWorkingMinutes(resourceReady, preparationMinutes, shifts, machineCode, unavailable, overtimePeriods);
+      let endAt = addWorkingMinutes(extrusionStartAt, theoreticalMinutes, shifts, machineCode, unavailable, overtimePeriods);
       for (let guard = 0; guard < 100; guard += 1) {
         const blockers: Array<{ end: Date; type: SimulationConflict["type"]; code: string; message: string }> = [];
         const toolKeyGlobal = normalizedAlloy(order.toolCode);
@@ -505,19 +639,20 @@ export function simulateMachineLoad(
           if (boCalendar) blockers.push({ end: boCalendar, type: "resource-calendar", code: boKey, message: `O BO ${boKey} está indisponível no calendário.` });
         }
         if (!blockers.length) break;
+        if (guard === 99) throw new Error("Há muitos conflitos de recursos para encontrar um horário seguro. Revise as reservas e calcule novamente.");
         const blocker = blockers.sort((left, right) => left.end.getTime() - right.end.getTime())[0];
         const previousReady = resourceReady;
-        resourceReady = nextWorkingInstant(new Date(blocker.end.getTime() + 1), shifts, machineCode, unavailable);
-        const delay = workingMinutesBetween(previousReady, resourceReady, shifts, machineCode, unavailable);
+        resourceReady = nextWorkingInstant(new Date(blocker.end.getTime() + 1), shifts, machineCode, unavailable, overtimePeriods);
+        const delay = workingMinutesBetween(previousReady, resourceReady, shifts, machineCode, unavailable, overtimePeriods);
         const existing = itemConflicts.find((item) => item.type === blocker.type && item.resourceCode === blocker.code && item.severity === "warning");
         if (existing) existing.delayMinutes += delay;
         else itemConflicts.push({ id: `${blocker.type}-${order.id}`, type: blocker.type, severity: "warning", resourceCode: blocker.code, machineCode, orderId: order.id, toolCode: order.toolCode, message: blocker.message, delayMinutes: delay });
-        extrusionStartAt = addWorkingMinutes(resourceReady, preparationMinutes, shifts, machineCode, unavailable);
-        endAt = addWorkingMinutes(extrusionStartAt, theoreticalMinutes, shifts, machineCode, unavailable);
+        extrusionStartAt = addWorkingMinutes(resourceReady, preparationMinutes, shifts, machineCode, unavailable, overtimePeriods);
+        endAt = addWorkingMinutes(extrusionStartAt, theoreticalMinutes, shifts, machineCode, unavailable, overtimePeriods);
       }
-      const thermalReadyBase = nextWorkingInstant(new Date(Math.max(pressReadyAt.getTime(), readyAt.getTime())), shifts, machineCode, unavailable);
-      const thermalWaitMinutes = workingMinutesBetween(pressReadyAt, thermalReadyBase, shifts, machineCode, unavailable);
-      const resourceWaitMinutes = workingMinutesBetween(resourceWaitStartedAt, resourceReady, shifts, machineCode, unavailable);
+      const thermalReadyBase = nextWorkingInstant(new Date(Math.max(pressReadyAt.getTime(), readyAt.getTime())), shifts, machineCode, unavailable, overtimePeriods);
+      const thermalWaitMinutes = workingMinutesBetween(pressReadyAt, thermalReadyBase, shifts, machineCode, unavailable, overtimePeriods);
+      const resourceWaitMinutes = workingMinutesBetween(resourceWaitStartedAt, resourceReady, shifts, machineCode, unavailable, overtimePeriods);
       const billetRequiredKg = remainingKg / settings.extrusionEfficiency;
       const billetBalanceBeforeKg = balances.get(selectedAlloy) ?? 0;
       const deficit = Math.max(billetRequiredKg - billetBalanceBeforeKg, 0);
@@ -532,7 +667,16 @@ export function simulateMachineLoad(
       total.loadedKg += loadedKg;
       total.endingBalanceKg = billetBalanceAfterKg;
       billetTotals.set(selectedAlloy, total);
-      items.push({ ...order, productivityKgH, remainingKg, selectedAlloy, startAt: resourceReady, extrusionStartAt, endAt, theoreticalMinutes, waitingMinutes: Math.max((resourceReady.getTime() - pressAvailable.getTime()) / minute, 0), preparationMinutes, billetRequiredKg, billetBarsLoaded, billetBalanceBeforeKg, billetBalanceAfterKg, pressReadyAt, toolHeatingStartAt: allocation?.start ?? null, calculatedToolReadyAt: readyAt, latestHeatingStartAt, ovenSlotNumber: allocation?.slot ?? null, thermalWaitMinutes, resourceWaitMinutes, resourceConflicts: itemConflicts });
+      const toolOvenExitAt = allocation ? new Date(extrusionStartAt) : null;
+      const readyWaitingMinutes = toolOvenExitAt && readyAt < toolOvenExitAt ? (toolOvenExitAt.getTime() - readyAt.getTime()) / minute : 0;
+      const allocatedSlot = allocation ? ovenSlots[allocation.slot - 1] : null;
+      const furnaceState: FurnaceTimelineState = order.toolHeatingState === "released" ? "released"
+        : !allocation || allocation.start > startedAt ? "planned"
+          : readyAt > startedAt ? "heating" : "ready_waiting";
+      items.push({ ...order, productivityKgH, remainingKg, selectedAlloy, startAt: resourceReady, extrusionStartAt, endAt, theoreticalMinutes, waitingMinutes: workingMinutesBetween(pressAvailable, resourceReady, shifts, machineCode, unavailable, overtimePeriods), preparationMinutes, initialPreparationMinutes, alloyChangeMinutes: alloyChange, toolChangeMinutes, billetRequiredKg, billetBarsLoaded, billetBalanceBeforeKg, billetBalanceAfterKg, pressReadyAt, toolHeatingStartAt: allocation?.start ?? null, calculatedToolReadyAt: readyAt, latestHeatingStartAt, ovenSlotNumber: allocation?.slot ?? null, ovenCode: allocatedSlot?.code ?? order.toolOvenCode ?? null, ovenPosition: allocatedSlot?.position ?? order.toolOvenPosition ?? null, toolOvenExitAt, readyWaitingMinutes, furnaceState, thermalWaitMinutes, resourceWaitMinutes, resourceConflicts: itemConflicts });
+      // Regra operacional: a retirada é confirmada ao iniciar a produção.
+      // Portanto, a posição continua indisponível durante a preparação.
+      if (allocatedSlot) allocatedSlot.availableAt = new Date(Math.max(allocatedSlot.availableAt.getTime(), extrusionStartAt.getTime()));
       const interval = { start: resourceReady, end: endAt, quantity: 1, orderId: order.id };
       toolReservations.set(toolKey, [...(toolReservations.get(toolKey) ?? []), interval]);
       if (carcass && carcass.capacity > 0) carcassReservations.set(carcassKey, [...(carcassReservations.get(carcassKey) ?? []), { ...interval, quantity: Math.max(order.carcassQuantity ?? 1, 1) }]);
@@ -542,10 +686,31 @@ export function simulateMachineLoad(
       previousAlloy = selectedAlloy;
     }
     const theoreticalMinutes = items.reduce((sum, item) => sum + item.theoreticalMinutes, 0);
-    const waitingMinutes = items.reduce((sum, item) => sum + item.waitingMinutes + item.preparationMinutes, 0);
+    // Espera é somente o tempo em que a prensa ficou aguardando forno,
+    // carcaça, BO, calendário ou outro recurso. O preparo já tem indicador
+    // próprio e não pode ser contado duas vezes.
+    const waitingMinutes = items.reduce((sum, item) => sum + item.waitingMinutes, 0);
     machines.push({ machineCode, items, startsAt: items[0]?.startAt ?? null, theoreticalMinutes, simulatedMinutes: items.length ? (items.at(-1)!.endAt.getTime() - startedAt.getTime()) / minute : 0, waitingMinutes, endsAt: items.at(-1)?.endAt ?? null, thermalCoverage: thermalCoverage(items, settings) });
   }
 
+  // Rebuild shared material balances in actual consumption order across presses.
+  balances.clear();
+  billetTotals.clear();
+  const chronologicalItems = machines.flatMap(machine => machine.items)
+    .sort((a, b) => a.extrusionStartAt.getTime() - b.extrusionStartAt.getTime() || a.id.localeCompare(b.id));
+  for (const item of chronologicalItems) {
+    const settings = settingsByMachine[item.machineCode] ?? Object.values(settingsByMachine)[0];
+    const before = balances.get(item.selectedAlloy) ?? 0;
+    const bars = Math.ceil(Math.max(item.billetRequiredKg - before, 0) / settings.billetBarWeightKg);
+    const loaded = bars * settings.billetBarWeightKg;
+    const after = Math.max(0, before + loaded - item.billetRequiredKg);
+    Object.assign(item, { billetBalanceBeforeKg: before, billetBarsLoaded: bars, billetBalanceAfterKg: after });
+    balances.set(item.selectedAlloy, after);
+    const total = billetTotals.get(item.selectedAlloy) ?? { alloyCode: item.selectedAlloy, demandKg: 0, rawRequiredKg: 0, bars: 0, loadedKg: 0, endingBalanceKg: 0 };
+    total.demandKg += item.remainingKg; total.rawRequiredKg += item.billetRequiredKg;
+    total.bars += bars; total.loadedKg += loaded; total.endingBalanceKg = after;
+    billetTotals.set(item.selectedAlloy, total);
+  }
   return {
     machines: machines.sort((a, b) => a.machineCode.localeCompare(b.machineCode)),
     billets: [...billetTotals.values()].sort((a, b) => a.alloyCode.localeCompare(b.alloyCode)),
@@ -554,5 +719,52 @@ export function simulateMachineLoad(
     totalBars: [...billetTotals.values()].reduce((sum, alloy) => sum + alloy.bars, 0),
     conflicts,
     feasible: !conflicts.some((conflict) => conflict.severity === "blocking"),
+    unavailable,
+    shifts,
+    overtimePeriods,
   };
+}
+
+export function simulateMachineLoad(
+  orders: LoadOrderInput[],
+  settingsByMachine: Record<string, MachineLoadSettings>,
+  startedAt: Date,
+  mode: "fifo" | "optimized" = "fifo",
+  shifts: WorkShiftInput[] = [],
+  unavailable: ResourceUnavailabilityInput[] = [],
+  resources: SimulationResourcesInput = { carcasses: [], bos: [] },
+  overtimePeriods: OvertimePeriodInput[] = [],
+): LoadSimulation {
+  // First pass uses the primary alloy only. Subsequent passes choose alternatives
+  // from the actual cross-press consumption order, then recalculate the schedule
+  // because an alloy change can alter preparation time and therefore chronology.
+  let forcedAlloys = new Map<string, string>();
+  let simulation = simulateMachineLoadPass(
+    orders,
+    settingsByMachine,
+    startedAt,
+    mode,
+    shifts,
+    unavailable,
+    resources,
+    overtimePeriods,
+    forcedAlloys,
+  );
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const nextChoices = globalMaterialChoices(simulation, orders, settingsByMachine);
+    if (sameMaterialChoices(forcedAlloys, nextChoices)) return simulation;
+    forcedAlloys = nextChoices;
+    simulation = simulateMachineLoadPass(
+      orders,
+      settingsByMachine,
+      startedAt,
+      mode,
+      shifts,
+      unavailable,
+      resources,
+      overtimePeriods,
+      forcedAlloys,
+    );
+  }
+  return simulation;
 }

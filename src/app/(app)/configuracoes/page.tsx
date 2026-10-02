@@ -1,7 +1,8 @@
 import Link from "next/link";
-import { ArrowRight, Boxes, Clock3, Factory, FileCog, Megaphone, Settings2, UserRound, UsersRound, Wrench, CircleStop, History, PackageOpen } from "lucide-react";
+import { ArrowRight, Boxes, Clock3, Factory, FileCog, Megaphone, Settings2, UserRound, UsersRound, Wrench, CircleStop, History, PackageOpen, Tags, BrainCircuit } from "lucide-react";
 import { PageHeading } from "@/components/page-heading";
 import { requireAdmin } from "@/lib/local-auth/server";
+import { MachineLoadSectionSettings } from "@/components/machine-load-section-settings";
 
 const registrationCards = [
   { title: "Prensas", description: "Equipamentos disponíveis para planejamento e produção.", href: "/prensas", icon: Factory },
@@ -11,7 +12,9 @@ const registrationCards = [
   { title: "Carcaças compartilhadas", description: "Estoque único de carcaças utilizado pelas duas prensas.", href: "/configuracoes/recursos-prensa", icon: Boxes },
   { title: "Turnos e produção", description: "Horários, produtividade padrão e premissas da simulação.", href: "/configuracoes/producao", icon: Clock3 },
   { title: "Paradas e motivos", description: "Catálogo de ocorrências para Produção e Manutenção.", href: "/configuracoes/paradas", icon: CircleStop },
+  { title: "Cadastros industriais", description: "Processo, Report da Produção, qualidade, manutenção e listas configuráveis.", href: "/configuracoes/ocorrencias", icon: Tags },
   { title: "Auditoria e conciliação", description: "Histórico imutável de setups, ações e confronto com os apontamentos da empresa.", href: "/configuracoes/auditoria", icon: History },
+  { title: "Critérios e analista IA do AluPilot", description: "Regras de decisão, limites operacionais, provedor e modelo de IA.", href: "/configuracoes/ia", icon: BrainCircuit },
 ];
 
 export default async function SettingsPage() {
@@ -35,6 +38,7 @@ export default async function SettingsPage() {
               <p className="mt-1.5 min-h-10 text-sm leading-5 text-slate-500">{item.description}</p>
             </Link>
           ))}
+          <MachineLoadSectionSettings />
         </div>
       </section>
       <section className="mt-5 overflow-hidden rounded-2xl border bg-white shadow-sm">

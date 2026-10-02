@@ -6,13 +6,18 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:portfolio": "node --experimental-strip-types --test tests/portfolio-priority-engine.test.mjs",
+    "test:planning": "node --experimental-strip-types --test tests/planning-regression.mjs"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.61",
+    "@ai-sdk/react": "^4.0.127",
     "@base-ui/react": "^1.7.0",
     "@hookform/resolvers": "^5.9.1",
     "@supabase/ssr": "^0.12.4",
     "@supabase/supabase-js": "^2.112.3",
+    "ai": "^7.0.124",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.33.0",

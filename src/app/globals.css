@@ -85,10 +85,46 @@
 
 @layer utilities {
   .font-heading { font-family: var(--font-manrope), sans-serif; }
+  @keyframes scenario-loader-shimmer {
+    0% { transform: translateX(-140%); }
+    100% { transform: translateX(540%); }
+  }
+  .scenario-loader-shimmer {
+    animation: scenario-loader-shimmer 1.15s ease-in-out infinite;
+  }
   .grid-noise {
     background-image: linear-gradient(to right, rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,.035) 1px, transparent 1px);
     background-size: 32px 32px;
   }
+
+  /* Faixa mais comum de monitores industriais: preserva legibilidade e área útil. */
+  @media (min-width: 1024px) and (max-width: 1439px) {
+    .app-main-shell {
+      padding: 1.25rem;
+    }
+
+    .app-main-shell [data-slot="card"] {
+      --card-spacing: 0.75rem;
+    }
+
+    .app-main-shell .overflow-x-auto,
+    .app-main-shell .overflow-auto {
+      overscroll-behavior-inline: contain;
+      scrollbar-width: thin;
+    }
+  }
+
+  @media (min-width: 1024px) and (max-width: 1366px) {
+    .app-main-shell table th,
+    .app-main-shell table td {
+      padding-block: 0.55rem;
+    }
+  }
+}
+
+@layer components {
+  .field-label { @apply mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-500; }
+  .field-select { @apply h-8 w-full rounded-lg border border-input bg-white px-2.5 text-sm outline-none focus:border-orange-500 focus:ring-3 focus:ring-orange-500/15; }
 }
 
 .dark {
@@ -134,5 +170,69 @@
   }
   html {
     @apply font-sans;
+  }
+}
+
+/* O painel operacional ocupa o viewport inteiro. A fila continua navegável,
+   mas a página não cria uma segunda barra de rolagem fora do painel. */
+body.oven-operational-active {
+  overflow: hidden;
+}
+
+.oven-operational-shell {
+  display: flex;
+  height: 100dvh;
+  min-height: 0 !important;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.oven-operational-shell > header {
+  flex: 0 0 auto;
+}
+
+.oven-operational-shell > main {
+  min-height: 0 !important;
+  height: auto !important;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.oven-operational-shell > main > div:first-child {
+  flex: 0 0 auto;
+}
+
+.oven-operational-shell > main > div:nth-child(2) {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.oven-operational-shell > main > div:nth-child(2) > section,
+.oven-operational-shell > main > div:nth-child(2) > aside {
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(148 163 184 / 0.65) transparent;
+}
+
+.oven-operational-shell > main > div:nth-child(2) > section {
+  overflow-x: hidden;
+}
+
+@media (max-width: 1279px) {
+  /* Em telas menores, mapa e fila formam uma única área interna de rolagem. */
+  .oven-operational-shell > main > div:nth-child(2) {
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+
+  .oven-operational-shell > main > div:nth-child(2) > section,
+  .oven-operational-shell > main > div:nth-child(2) > aside {
+    max-height: none;
+    overflow: visible;
   }
 }

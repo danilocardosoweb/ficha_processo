@@ -40,6 +40,7 @@ type Tool = {
   holes: number | null;
   theoretical_linear_weight_kg_m: number | null;
   actual_linear_weight_kg_m: number | null;
+  tool_weight_kg: number | null;
   useful_life_kg: number | null;
   produced_kg: number | null;
   remaining_kg: number | null;
@@ -118,7 +119,7 @@ export function ToolsManager() {
       let query = createClient()
         .from("tools")
         .select(
-          "id,code,description,lifecycle_kg,status,updated_at,matrix_code,sequence_number,holes,theoretical_linear_weight_kg_m,actual_linear_weight_kg_m,useful_life_kg,produced_kg,remaining_kg,source_status,source_available,machine_codes,package_measure_mm,carcass_diameter_mm,carcass_code",
+          "id,code,description,lifecycle_kg,status,updated_at,matrix_code,sequence_number,holes,theoretical_linear_weight_kg_m,actual_linear_weight_kg_m,tool_weight_kg,useful_life_kg,produced_kg,remaining_kg,source_status,source_available,machine_codes,package_measure_mm,carcass_diameter_mm,carcass_code",
           { count: "exact" },
         )
         .eq("organization_id", organizationId)
@@ -202,6 +203,7 @@ export function ToolsManager() {
       holes: Number(form.get("holes")) || null,
       theoretical_linear_weight_kg_m:
         Number(form.get("theoretical_linear_weight_kg_m")) || null,
+      tool_weight_kg: Number(form.get("tool_weight_kg")) || null,
       useful_life_kg: Number(form.get("useful_life_kg")) || null,
       lifecycle_kg: Number(form.get("produced_kg")) || 0,
       produced_kg: Number(form.get("produced_kg")) || 0,
@@ -329,7 +331,7 @@ export function ToolsManager() {
       ) : (
         <>
           <div className="max-h-[calc(100vh-330px)] min-h-72 overflow-auto">
-            <table className="w-full min-w-[1240px] text-left text-sm">
+            <table className="w-full min-w-[1040px] text-left text-sm min-[1440px]:min-w-[1240px]">
               <thead className="sticky top-0 z-10 bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500 shadow-[0_1px_0_0_#e2e8f0]">
                 <tr>
                   <th className="px-4 py-3">Ferramenta</th>
@@ -538,6 +540,14 @@ export function ToolsManager() {
                 step="0.0001"
                 min="0"
                 defaultValue={editing?.theoretical_linear_weight_kg_m ?? ""}
+              />
+              <Field
+                label="Peso físico da ferramenta (kg)"
+                name="tool_weight_kg"
+                type="number"
+                step="0.001"
+                min="0"
+                defaultValue={editing?.tool_weight_kg ?? ""}
               />
               <Field
                 label="Produzido (kg)"

@@ -4,17 +4,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  BarChart3,
   CalendarDays,
   CircleStop,
   Calculator,
   Check,
   CheckCircle2,
+  ClipboardCheck,
   ChevronDown,
   Factory,
   FileClock,
   FilePlus2,
   Flame,
   Gauge,
+  GripVertical,
   History,
   Loader2,
   LockKeyhole,
@@ -26,6 +31,7 @@ import {
   RefreshCw,
   Save,
   Search,
+  Scale,
   SquareCheckBig,
   Target,
   Thermometer,
@@ -157,6 +163,10 @@ type Order = {
   due_date: string | null;
   process_sheet_id: string | null;
   achieved_productivity_kg_h: number | null;
+  requires_test?: boolean;
+  active_sequence_source?: "original" | "simulation";
+  active_sequence_scenario_id?: string | null;
+  active_sequence_version?: number | null;
 };
 type PlanHeatingLocation = {
   id: string;
@@ -168,10 +178,33 @@ type PlanHeatingLocation = {
   expected_ready_at: string;
   tool_heating_cycle_orders: { production_order_id: string }[];
 };
+type SimplifiedSequenceMetadata = {
+  active_sequence_source?: "original" | "simulation" | null;
+  active_sequence_scenario_id?: string | null;
+  active_sequence_version?: number | null;
+};
+type ActiveSequenceSnapshot = {
+  scenarioId: string;
+  versionNumber: number | null;
+  orderIds: string[];
+};
+type ProductionReadinessSetting = {
+  machine_code: string;
+  billet_bar_weight_kg: number;
+  extrusion_efficiency: number;
+  tool_change_minutes?: number | null;
+};
+type ProductionReadinessTool = { code: string; tool_weight_kg: number | null };
 const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
+const SEQUENCE_REASON_MIN_LENGTH = 5;
 
 const numeric = (value: unknown, fallback = 0) =>
   typeof value === "number" && Number.isFinite(value) ? value : fallback;
+const isMissingColumn = (cause: unknown, column: string) => {
+  if (!cause || typeof cause !== "object") return false;
+  const problem = cause as { code?: string; message?: string };
+  return problem.code === "42703" && Boolean(problem.message?.includes(column));
+};
 const format = (value: number, decimals = 0) =>
   value.toLocaleString("pt-BR", {
     minimumFractionDigits: decimals,
@@ -187,7 +220,28 @@ const discardMm = (sheet?: ProcessSheet) =>
   numeric(sheet?.parameters.extrusion?.discard_mm) ||
   numeric(sheet?.parameters.extrusion?.discard_m) * 1000;
 const orderFields =
-  "id,import_batch_id,order_number,plan_code,machine_code,tool_code,product_code,customer_name,alloy_code,temper,target_kg,target_quantity,demand_unit,is_active,produced_kg,produced_quantity,status,sequence,actual_start,actual_end,started_by_name,completed_by_name,reopened_at,reopened_by_name,reprogram_count,due_date,process_sheet_id,achieved_productivity_kg_h";
+  "id,import_batch_id,order_number,plan_code,machine_code,tool_code,product_code,customer_name,alloy_code,temper,target_kg,target_quantity,demand_unit,is_active,produced_kg,produced_quantity,status,sequence,actual_start,actual_end,started_by_name,completed_by_name,reopened_at,reopened_by_name,reprogram_count,due_date,process_sheet_id,achieved_productivity_kg_h,requires_test,active_sequence_source,active_sequence_scenario_id,active_sequence_version";
+
+function simulationDisplayId(scenarioId: string) {
+  const compactId = scenarioId.replace(/-/g, "").slice(0, 10).toUpperCase();
+  return `SIM-${compactId}`;
+}
+
+async function loadApprovedSequenceSnapshots(): Promise<ActiveSequenceSnapshot[]> {
+  try {
+    const response = await fetch("/api/simulation-scenarios/active-sequence", {
+      cache: "no-store",
+    });
+    if (!response.ok) return [];
+    const payload = await response.json();
+    if (!Array.isArray(payload)) return [];
+    return payload.filter((item): item is ActiveSequenceSnapshot =>
+      Boolean(item && typeof item.scenarioId === "string" && Array.isArray(item.orderIds)),
+    );
+  } catch {
+    return [];
+  }
+}
 
 const displayDueDate = (value: string | null) => {
   if (!value) return "—";
@@ -319,7 +373,11 @@ function calculate(
 
 export function ProductionCockpit() {
   const router = useRouter();
-  const { display_name: operatorName } = useCurrentUser();
+  const { user_id: userId, display_name: operatorName, machine_codes: userMachineCodes, role } = useCurrentUser();
+  const allowedMachines = useMemo(
+    () => userMachineCodes?.length ? new Set(userMachineCodes) : null,
+    [userMachineCodes],
+  );
   const [toolInput, setToolInput] = useState("");
   const [sheets, setSheets] = useState<ProcessSheet[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -335,17 +393,30 @@ export function ProductionCockpit() {
   const [planSearchLoading, setPlanSearchLoading] = useState(false);
   const [preheatedOrders, setPreheatedOrders] = useState<Order[] | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [inProgressOpen, setInProgressOpen] = useState(false);
+  const [inProgressOrders, setInProgressOrders] = useState<Order[]>([]);
+  const [inProgressLoading, setInProgressLoading] = useState(false);
   const [sheetEditorOpen, setSheetEditorOpen] = useState(false);
   const [sheetHistoryOpen, setSheetHistoryOpen] = useState(false);
   const [completionOpen, setCompletionOpen] = useState(false);
   const [stoppageOpen, setStoppageOpen] = useState(false);
+  const [startConfirmationOpen, setStartConfirmationOpen] = useState(false);
+  const [earlyStartJustification, setEarlyStartJustification] = useState("");
+  const [startConfirmationError, setStartConfirmationError] = useState("");
   const [unit, setUnit] = useState<Unit>("kg");
   const [requested, setRequested] = useState(0);
   const [manualBillets, setManualBillets] = useState<number | undefined>();
   const [loading, setLoading] = useState(false);
   const [savingStatus, setSavingStatus] = useState(false);
   const [message, setMessage] = useState("");
+  const [recalculationNeeded, setRecalculationNeeded] = useState(false);
   const [missingSheetTool, setMissingSheetTool] = useState("");
+  const [readinessOrders, setReadinessOrders] = useState<Order[]>([]);
+  const [readinessSettings, setReadinessSettings] = useState<ProductionReadinessSetting[]>([]);
+  const [readinessTools, setReadinessTools] = useState<ProductionReadinessTool[]>([]);
+  const [readinessLoading, setReadinessLoading] = useState(true);
+  const [readinessError, setReadinessError] = useState("");
+  const [readinessUpdatedAt, setReadinessUpdatedAt] = useState<string | null>(null);
   const selected = useMemo(
     () => sheets.find((sheet) => sheet.id === selectedId),
     [sheets, selectedId],
@@ -368,6 +439,119 @@ export function ProductionCockpit() {
     );
   }, [planSearchQuery, planSearchResults]);
 
+  const canUseMachine = useCallback(
+    (machineCode: string | null | undefined) => !machineCode || !allowedMachines || allowedMachines.has(machineCode),
+    [allowedMachines],
+  );
+  const canEditWorkSequence = role === "admin" || role === "manager" || role === "pcp";
+
+  const loadProductionReadiness = useCallback(async () => {
+    if (!organizationId) return;
+    setReadinessLoading(true);
+    try {
+      const supabase = createClient();
+      const buildReadinessOrderQuery = (includeTestColumn: boolean) => {
+        let query = supabase
+          .from("production_orders")
+          .select(`id,order_number,plan_code,machine_code,tool_code,alloy_code,target_kg,target_quantity,demand_unit,is_active,produced_kg,produced_quantity,status,sequence,due_date${includeTestColumn ? ",requires_test" : ""}`)
+          .eq("organization_id", organizationId)
+          .eq("is_active", true)
+          .in("status", ["planned", "released", "in_progress", "paused"]);
+        if (allowedMachines) query = query.in("machine_code", Array.from(allowedMachines));
+        return query.order("machine_code").order("sequence").limit(1_000);
+      };
+      const [initialOrderResult, initialToolResult, settingsResponse] = await Promise.all([
+        withSupabaseTimeout(
+          buildReadinessOrderQuery(true),
+        ),
+        withSupabaseTimeout(
+          supabase
+            .from("tools")
+            .select("code,tool_weight_kg")
+            .eq("organization_id", organizationId)
+            .limit(2_000),
+        ),
+        fetch("/api/production-settings", { cache: "no-store" }),
+      ]);
+      const warnings: string[] = [];
+      let orderData = initialOrderResult.data;
+      let orderError = initialOrderResult.error;
+      if (isMissingColumn(orderError, "requires_test")) {
+        const fallbackOrderResult = await withSupabaseTimeout(buildReadinessOrderQuery(false));
+        orderData = fallbackOrderResult.data;
+        orderError = fallbackOrderResult.error;
+        warnings.push("A coluna de testes do PCP ainda não foi aplicada; os indicadores continuam disponíveis.");
+      }
+      if (orderError) throw orderError;
+      const filteredOrders = ((orderData ?? []) as unknown as Order[])
+        .map((order) => ({ ...order, requires_test: order.requires_test ?? false }))
+        .filter((order) => canUseMachine(order.machine_code));
+      setReadinessOrders(filteredOrders);
+      let toolData = initialToolResult.data;
+      let toolError = initialToolResult.error;
+      if (isMissingColumn(toolError, "tool_weight_kg")) {
+        const fallbackToolResult = await withSupabaseTimeout(
+          supabase
+            .from("tools")
+            .select("code")
+            .eq("organization_id", organizationId)
+            .limit(2_000),
+        );
+        toolData = (fallbackToolResult.data ?? []).map((tool) => ({ ...tool, tool_weight_kg: null }));
+        toolError = fallbackToolResult.error;
+        warnings.push("Cadastre o peso físico das ferramentas para sugerir testes de até 50 kg.");
+      }
+      if (toolError) {
+        setReadinessTools([]);
+        warnings.push("Não foi possível carregar os pesos físicos das ferramentas.");
+      } else {
+        setReadinessTools((toolData ?? []) as ProductionReadinessTool[]);
+      }
+      if (settingsResponse.ok) {
+        const payload = (await settingsResponse.json()) as { settings?: ProductionReadinessSetting[] };
+        setReadinessSettings(payload.settings ?? []);
+      } else {
+        setReadinessSettings([]);
+      }
+      setReadinessError(warnings.join(" "));
+      setReadinessUpdatedAt(new Date().toISOString());
+    } catch (cause) {
+      setReadinessError(errorMessage(cause));
+    } finally {
+      setReadinessLoading(false);
+    }
+  }, [allowedMachines, canUseMachine]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadProductionReadiness(), 0);
+    const refresh = window.setInterval(() => void loadProductionReadiness(), 30_000);
+    return () => {
+      window.clearTimeout(timer);
+      window.clearInterval(refresh);
+    };
+  }, [loadProductionReadiness]);
+
+  const toggleReadinessTests = useCallback(async (orderIds: string[], required: boolean) => {
+    if (!organizationId || !orderIds.length) return;
+    const response = await fetch("/api/production-tests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ orderIds, requiresTest: required }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      setReadinessError(payload.error || "Não foi possível atualizar os testes.");
+      return;
+    }
+    const ids = new Set(orderIds);
+    setReadinessOrders((current) =>
+      current.map((order) =>
+        ids.has(order.id) ? { ...order, requires_test: required } : order,
+      ),
+    );
+    setReadinessUpdatedAt(new Date().toISOString());
+  }, []);
+
   const applyOrders = useCallback(
     (ids: string[], source = orders) => {
       const picked = source.filter((order) => ids.includes(order.id));
@@ -384,8 +568,8 @@ export function ProductionCockpit() {
           (sum, order) =>
             sum +
             (nextUnit === "kg"
-              ? numeric(order.target_kg)
-              : numeric(order.target_quantity)),
+              ? Math.max(0, numeric(order.target_kg) - numeric(order.produced_kg))
+              : Math.max(0, numeric(order.target_quantity) - numeric(order.produced_quantity))),
           0,
         ),
       );
@@ -416,6 +600,7 @@ export function ProductionCockpit() {
           { data, error: sheetError },
           { data: orderData, error: orderError },
           { data: completedData, error: completedError },
+          { data: heatingData, error: heatingError },
         ] = await Promise.all([
           withSupabaseTimeout(
             supabase
@@ -450,12 +635,23 @@ export function ProductionCockpit() {
               .order("actual_end", { ascending: false })
               .limit(100),
           ),
+          withSupabaseTimeout(
+            supabase
+              .from("tool_heating_cycles")
+              .select("id,machine_code,tool_code,oven_code,oven_position,status,expected_ready_at,tool_heating_cycle_orders(production_order_id)")
+              .eq("organization_id", organizationId)
+              .in("status", ["heating", "released"])
+              .order("entered_at", { ascending: false })
+              .limit(300),
+          ),
         ]);
         if (sheetError) throw sheetError;
         if (orderError) throw orderError;
         if (completedError) throw completedError;
-        const found = (data ?? []) as ProcessSheet[];
+        if (heatingError) throw heatingError;
+        const found = ((data ?? []) as ProcessSheet[]).filter((sheet) => canUseMachine(sheet.machine_code));
         const activeOrders = ((orderData ?? []) as Order[]).filter((order) =>
+          canUseMachine(order.machine_code) &&
           normalizeCode(
             `${order.tool_code} ${order.product_code ?? ""}`,
           ).includes(search),
@@ -464,11 +660,13 @@ export function ProductionCockpit() {
         setOrders(activeOrders);
         setCompletedOrders(
           ((completedData ?? []) as Order[]).filter((order) =>
+            canUseMachine(order.machine_code) &&
             normalizeCode(
               `${order.tool_code} ${order.product_code ?? ""}`,
             ).includes(search),
           ),
         );
+        setPlanHeatingLocations((heatingData ?? []) as unknown as PlanHeatingLocation[]);
         if (!found.length) {
           setSelectedId("");
           setMissingSheetTool(raw.toUpperCase());
@@ -500,26 +698,29 @@ export function ProductionCockpit() {
           );
         }
       } catch {
-        const [sheetCache, orderCache] = await Promise.all([
-          getOfflineSnapshot<ProcessSheet>("process_sheets"),
-          getOfflineSnapshot<Order>("production_orders"),
+      const [sheetCache, orderCache, heatingCache] = await Promise.all([
+        getOfflineSnapshot<ProcessSheet>("process_sheets"),
+        getOfflineSnapshot<Order>("production_orders"),
+        getOfflineSnapshot<PlanHeatingLocation>("tool_heating_cycles"),
         ]);
         const found = (sheetCache?.rows ?? []).filter(
           (sheet) =>
             sheet.is_active &&
+            canUseMachine(sheet.machine_code) &&
             normalizeCode(sheet.product_code || sheet.tool_code).includes(
               search,
             ),
         );
         const activeOrders = (orderCache?.rows ?? []).filter(
           (order) =>
-            order.is_active !== false &&
+            order.is_active !== false && canUseMachine(order.machine_code) &&
             normalizeCode(
               `${order.tool_code} ${order.product_code ?? ""}`,
             ).includes(search),
         );
         setSheets(found);
         setOrders(activeOrders);
+        setPlanHeatingLocations((heatingCache?.rows ?? []).filter((cycle) => ["heating", "released"].includes(cycle.status)));
         if (found.length) {
           setMissingSheetTool("");
           setSelectedId(found[0].id);
@@ -537,7 +738,7 @@ export function ProductionCockpit() {
         setLoading(false);
       }
     },
-    [applyOrders, toolInput],
+    [applyOrders, canUseMachine, toolInput],
   );
 
   useEffect(() => {
@@ -570,18 +771,18 @@ export function ProductionCockpit() {
     setMessage("");
     try {
       const supabase = createClient();
-      const [orderResponse, heatingResponse] = await Promise.all([
+      const [orderResponse, heatingResponse, activeSequenceSnapshots] = await Promise.all([
         withSupabaseTimeout(
           supabase
             .from("production_orders")
-            .select(`${orderFields},simplified_imports!inner(id,is_active,status,deleted_at)`)
+            .select(`${orderFields},simplified_imports!inner(id,is_active,status,deleted_at,active_sequence_source,active_sequence_scenario_id,active_sequence_version)`)
             .eq("organization_id", organizationId)
             .eq("is_active", true)
             .in("status", ["planned", "released", "in_progress", "paused"])
             .eq("simplified_imports.is_active", true)
             .eq("simplified_imports.status", "processed")
             .is("simplified_imports.deleted_at", null)
-            .order("due_date", { ascending: true, nullsFirst: false })
+            .order("machine_code")
             .order("sequence")
             .limit(1000),
         ),
@@ -594,10 +795,47 @@ export function ProductionCockpit() {
             .order("entered_at", { ascending: false })
             .limit(300),
         ),
+        withSupabaseTimeout(loadApprovedSequenceSnapshots()),
       ]);
       if (orderResponse.error) throw orderResponse.error;
       if (heatingResponse.error) throw heatingResponse.error;
-      setPlanSearchResults((orderResponse.data ?? []) as unknown as Order[]);
+      const planOrders = (orderResponse.data ?? []) as unknown as Array<Order & {
+        simplified_imports?: SimplifiedSequenceMetadata | SimplifiedSequenceMetadata[] | null;
+      }>;
+      const normalizedPlanOrders = planOrders.map(({ simplified_imports, ...order }) => {
+        const importSequence = Array.isArray(simplified_imports)
+          ? simplified_imports[0]
+          : simplified_imports;
+        const snapshotSequence = activeSequenceSnapshots.find((snapshot) => snapshot.orderIds.includes(order.id));
+        const importHasSimulation = importSequence?.active_sequence_source === "simulation";
+        return {
+          ...order,
+          active_sequence_source: importHasSimulation
+            ? "simulation"
+            : order.active_sequence_source === "simulation"
+              ? "simulation"
+              : importSequence?.active_sequence_source === "simulation" || snapshotSequence
+                ? "simulation"
+                : order.active_sequence_source ?? importSequence?.active_sequence_source ?? "original",
+          active_sequence_scenario_id: importHasSimulation
+            ? importSequence?.active_sequence_scenario_id ?? order.active_sequence_scenario_id ?? snapshotSequence?.scenarioId ?? null
+            : order.active_sequence_source === "simulation"
+              ? order.active_sequence_scenario_id ?? null
+              : importSequence?.active_sequence_scenario_id
+                ?? snapshotSequence?.scenarioId
+                ?? order.active_sequence_scenario_id
+                ?? null,
+          active_sequence_version: importHasSimulation
+            ? importSequence?.active_sequence_version ?? order.active_sequence_version ?? snapshotSequence?.versionNumber ?? null
+            : order.active_sequence_source === "simulation"
+              ? order.active_sequence_version ?? null
+              : importSequence?.active_sequence_version
+                ?? snapshotSequence?.versionNumber
+                ?? order.active_sequence_version
+                ?? null,
+        } satisfies Order;
+      });
+      setPlanSearchResults(normalizedPlanOrders.filter((order) => canUseMachine(order.machine_code)));
       setPlanHeatingLocations((heatingResponse.data ?? []) as unknown as PlanHeatingLocation[]);
     } catch {
       const [orderCache, heatingCache] = await Promise.all([
@@ -606,10 +844,10 @@ export function ProductionCockpit() {
       ]);
       const matches = (orderCache?.rows ?? []).filter(
         (order) =>
-          order.is_active !== false &&
+          order.is_active !== false && canUseMachine(order.machine_code) &&
           ["planned", "released", "in_progress", "paused"].includes(order.status),
       );
-      setPlanSearchResults(matches);
+      setPlanSearchResults(matches.sort((left, right) => left.machine_code.localeCompare(right.machine_code) || left.sequence - right.sequence));
       setPlanHeatingLocations((heatingCache?.rows ?? []).filter((cycle) => ["heating", "released"].includes(cycle.status)));
       setMessage(
         "Modo offline: Planos e posições de forno carregados da última cópia local sincronizada.",
@@ -619,6 +857,25 @@ export function ProductionCockpit() {
     }
   }
 
+  async function applyWorkSequence(orderIds: string[], password: string, reason: string) {
+    const response = await fetch("/api/production/resequence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orderIds, password, reason }),
+    });
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: string;
+      changedOrders?: number;
+      orderCount?: number;
+    };
+    if (!response.ok) throw new Error(payload.error || "Não foi possível recalcular a sequência de trabalho.");
+    await loadActivePlans();
+    setRecalculationNeeded(true);
+    setMessage(
+      `Sequência recalculada por prensa: ${payload.changedOrders ?? 0} ordem(ns) alterada(s) em ${payload.orderCount ?? orderIds.length} ordem(ns). Confira a Carga Máquina antes de iniciar.`,
+    );
+  }
+
   function openPlanExplorer() {
     setPlanSearchOpen(true);
     setPlanSearchQuery("");
@@ -626,13 +883,44 @@ export function ProductionCockpit() {
     void loadActivePlans();
   }
 
+  async function openInProgressPicker() {
+    if (!organizationId) return;
+    setInProgressOpen(true);
+    setInProgressLoading(true);
+    try {
+      let query = createClient()
+        .from("production_orders")
+        .select(orderFields)
+        .eq("organization_id", organizationId)
+        .eq("is_active", true)
+        .eq("status", "in_progress")
+        .order("machine_code")
+        .order("actual_start", { ascending: false })
+        .limit(100);
+      if (allowedMachines) query = query.in("machine_code", [...allowedMachines]);
+      const { data, error } = await withSupabaseTimeout(query);
+      if (error) throw error;
+      setInProgressOrders(((data ?? []) as Order[]).filter((order) => canUseMachine(order.machine_code)));
+    } catch (cause) {
+      setInProgressOrders([]);
+      setMessage(errorMessage(cause));
+    } finally {
+      setInProgressLoading(false);
+    }
+  }
+
+  function openInProgressOrder(order: Order) {
+    setInProgressOpen(false);
+    setToolInput(order.tool_code);
+    void findSheets(order.tool_code, undefined, order.machine_code, [order.id]);
+  }
+
   function togglePlanSearchOrder(id: string) {
     const order = planSearchResults.find((item) => item.id === id);
     if (!order) return;
     if (order.status === "in_progress") {
-      setMessage(
-        `A ordem ${order.order_number} já está em produção e não pode entrar em uma nova campanha.`,
-      );
+      void finishLoadingPlanCampaign([order]);
+      setMessage(`Acessando a produção em andamento da ordem ${order.order_number}.`);
       return;
     }
     if (planSearchSelection.includes(id)) {
@@ -786,41 +1074,82 @@ export function ProductionCockpit() {
     }
   }
 
-  async function startProduction() {
+  function requestStartProduction() {
     if (!chosen.length) {
       setMessage("Selecione ao menos um item para iniciar a produção.");
       return;
     }
+    setEarlyStartJustification("");
+    setStartConfirmationError("");
+    setStartConfirmationOpen(true);
+  }
+
+  async function confirmStartProduction() {
+    if (!chosen.length) return;
     setSavingStatus(true);
     setMessage("");
+    setStartConfirmationError("");
     try {
-      const supabase = createClient();
-      const ids = chosen.map((order) => order.id);
-      const { data, error } = await supabase
-        .from("production_orders")
-        .update({
-          status: "in_progress",
-          started_by_name: operatorName,
-          last_status_reason: `Produção iniciada por ${operatorName}`,
-        })
-        .in("id", ids)
-        .eq("is_active", true)
-        .in("status", ["planned", "released", "paused"])
-        .select(orderFields);
-      if (error) throw error;
-      if (!data || data.length !== ids.length)
-        throw new Error(
-          "Um dos itens já foi iniciado, concluído ou retirado da programação. Atualize a busca antes de continuar.",
-        );
-      const updated = data as Order[];
+      const response = await fetch("/api/production/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderIds: chosen.map((order) => order.id),
+          confirmedRemovedFromOven: true,
+          earlyReleaseJustification: earlyStartJustification.trim() || undefined,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        orders?: Order[];
+        released_cycle_ids?: string[];
+        early_release?: boolean;
+      };
+      if (!response.ok || !payload.orders) {
+        throw new Error(payload.error || "Não foi possível iniciar a produção.");
+      }
+      const updated = payload.orders;
       setOrders((current) =>
         current.map(
           (order) => updated.find((item) => item.id === order.id) ?? order,
         ),
       );
+      if (payload.released_cycle_ids?.length) {
+        const released = new Set(payload.released_cycle_ids);
+        setPlanHeatingLocations((current) => current.map((cycle) => released.has(cycle.id) ? { ...cycle, status: "released" } : cycle));
+      }
+      setStartConfirmationOpen(false);
       setMessage(
-        `${updated.length === 1 ? `Produção ${updated[0].order_number}` : `Campanha com ${updated.length} itens`} iniciada por ${operatorName}.`,
+        `${updated.length === 1 ? `Produção ${updated[0].order_number}` : `Campanha com ${updated.length} itens`} iniciada por ${operatorName}${payload.early_release ? ". A liberação antecipada foi registrada na auditoria." : "."}`,
       );
+      requestOfflineSync("production_orders");
+    } catch (cause) {
+      setStartConfirmationError(errorMessage(cause));
+    } finally {
+      setSavingStatus(false);
+    }
+  }
+
+  async function resumeProduction() {
+    if (!chosen.length) return;
+    setSavingStatus(true);
+    setMessage("");
+    try {
+      const { data, error } = await createClient()
+        .from("production_orders")
+        .update({
+          status: "in_progress",
+          last_status_reason: `Produção retomada por ${operatorName}`,
+        })
+        .in("id", chosen.map((order) => order.id))
+        .eq("is_active", true)
+        .eq("status", "paused")
+        .select(orderFields);
+      if (error) throw error;
+      if (!data || data.length !== chosen.length) throw new Error("Um dos itens não está mais pausado. Atualize a busca antes de continuar.");
+      const updated = data as Order[];
+      setOrders((current) => current.map((order) => updated.find((item) => item.id === order.id) ?? order));
+      setMessage(`${updated.length === 1 ? `Produção ${updated[0].order_number}` : `Campanha com ${updated.length} itens`} retomada por ${operatorName}.`);
       requestOfflineSync("production_orders");
     } catch (cause) {
       setMessage(errorMessage(cause));
@@ -834,6 +1163,8 @@ export function ProductionCockpit() {
     producedQuantity: number,
     notes: string,
     achievedProductivity: number,
+    outcome: "complete" | "partial_tool" | "partial_later",
+    partialReason: string,
   ) {
     if (!chosen.length) {
       setMessage("Selecione ao menos um item para concluir.");
@@ -842,15 +1173,49 @@ export function ProductionCockpit() {
     setSavingStatus(true);
     setMessage("");
     try {
+      if (outcome !== "complete") {
+        const response = await fetch("/api/production/partial", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            orderIds: chosen.map((order) => order.id),
+            producedKg,
+            producedQuantity,
+            reasonType: outcome === "partial_tool" ? "tool_issue" : "produce_later",
+            reason: partialReason.trim(),
+            notes: notes.trim() || undefined,
+            achievedProductivity,
+            processSheetId: selected?.id ?? undefined,
+          }),
+        });
+        const payload = (await response.json().catch(() => ({}))) as { error?: string; orders?: Order[]; status?: string };
+        if (!response.ok || !payload.orders) throw new Error(payload.error || "Não foi possível registrar a produção parcial.");
+        const updated = payload.orders;
+        setOrders((current) => current.map((order) => updated.find((item) => item.id === order.id) ?? order));
+        setSelectedOrders([]);
+        setRequested(0);
+        setManualBillets(undefined);
+        setCompletionOpen(false);
+        setRecalculationNeeded(true);
+        setMessage(outcome === "partial_tool"
+          ? "Produção parcial registrada. O item ficou pausado para tratar a ferramenta; ao retomar, informe somente o saldo restante. Recalcule a Carga Máquina para atualizar a previsão."
+          : "Produção parcial registrada. O saldo voltou para a programação como item planejado; recalcule a Carga Máquina para obter a nova previsão.");
+        requestOfflineSync(["production_orders", "process_sheets"]);
+        return;
+      }
       const supabase = createClient();
       const totalTargetKg = chosen.reduce(
-        (sum, order) => sum + numeric(order.target_kg),
+        (sum, order) => sum + Math.max(0, numeric(order.target_kg) - numeric(order.produced_kg)),
         0,
       );
       const totalTargetPieces = chosen.reduce(
-        (sum, order) => sum + numeric(order.target_quantity),
+        (sum, order) => sum + Math.max(0, numeric(order.target_quantity) - numeric(order.produced_quantity)),
         0,
       );
+      if (totalTargetKg > 0 && producedKg + 0.001 < totalTargetKg)
+        throw new Error("O peso informado é menor que o saldo da ordem. Registre como produção parcial para preservar o restante na programação.");
+      if (totalTargetPieces > 0 && producedQuantity < totalTargetPieces)
+        throw new Error("A quantidade informada é menor que o saldo da ordem. Registre como produção parcial para preservar o restante na programação.");
       let allocatedKg = 0;
       let allocatedPieces = 0;
       const completed: Order[] = [];
@@ -861,7 +1226,7 @@ export function ProductionCockpit() {
           : totalTargetKg > 0
             ? Number(
                 (
-                  (producedKg * numeric(order.target_kg)) /
+                  (producedKg * Math.max(0, numeric(order.target_kg) - numeric(order.produced_kg))) /
                   totalTargetKg
                 ).toFixed(3),
               )
@@ -870,7 +1235,7 @@ export function ProductionCockpit() {
           ? producedQuantity - allocatedPieces
           : totalTargetPieces > 0
             ? Math.round(
-                (producedQuantity * numeric(order.target_quantity)) /
+                  (producedQuantity * Math.max(0, numeric(order.target_quantity) - numeric(order.produced_quantity))) /
                   totalTargetPieces,
               )
             : 0;
@@ -880,8 +1245,8 @@ export function ProductionCockpit() {
           .from("production_orders")
           .update({
             status: "completed",
-            produced_kg: Math.max(0, Number(orderKg.toFixed(3))),
-            produced_quantity: Math.max(0, Math.round(orderPieces)),
+            produced_kg: Math.max(0, Number((numeric(order.produced_kg) + orderKg).toFixed(3))),
+            produced_quantity: Math.max(0, Math.round(numeric(order.produced_quantity) + orderPieces)),
             completed_by_name: operatorName,
             actual_end: new Date().toISOString(),
             process_sheet_id: selected?.id ?? null,
@@ -1145,6 +1510,16 @@ export function ProductionCockpit() {
           )}
           Buscar nos Planos
         </Button>
+        <Button
+          variant="outline"
+          onClick={() => router.push("/manutencao?novaParada=1")}
+          className="h-10 border-amber-200 px-3 text-sm font-bold text-amber-800 hover:bg-amber-50"
+          title="Registrar uma parada de máquina sem produção ativa"
+        >
+          <CircleStop className="size-4" />
+          <span className="hidden 2xl:inline">Parada de máquina</span>
+          <span className="2xl:hidden">Parada</span>
+        </Button>
         <select
           aria-label="Comprimento de corte"
           value={selectedId}
@@ -1185,6 +1560,19 @@ export function ProductionCockpit() {
         </div>
         <div className="relative">
           <Button
+            variant="outline"
+            className="h-10 px-3 text-sm font-bold text-emerald-700 hover:bg-emerald-50"
+            onClick={() => void openInProgressPicker()}
+            disabled={inProgressLoading}
+          >
+            {inProgressLoading ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+            <span className="hidden xl:inline">Em andamento</span>
+            <span className="xl:hidden">Andamento</span>
+          </Button>
+          {inProgressOpen && <InProgressPicker orders={inProgressOrders} loading={inProgressLoading} allowedMachines={allowedMachines} onOpen={openInProgressOrder} onClose={() => setInProgressOpen(false)} />}
+        </div>
+        <div className="relative">
+          <Button
             variant="ghost"
             className="h-10 px-2 text-sm"
             onClick={() => setHistoryOpen((value) => !value)}
@@ -1219,40 +1607,30 @@ export function ProductionCockpit() {
           {message}
         </div>
       )}
-      {!selected ? (
-        <div className="grid min-h-0 flex-1 place-items-center rounded-xl border border-dashed bg-white">
-          <div className="max-w-lg px-6 text-center">
-            {missingSheetTool ? (
-              <FilePlus2 className="mx-auto size-10 text-orange-500" />
-            ) : (
-              <Wrench className="mx-auto size-9 text-orange-400" />
-            )}
-            <h2 className="mt-3 font-heading text-lg font-bold">
-              {missingSheetTool
-                ? `Crie a ficha de ${missingSheetTool}`
-                : "Abra uma Ficha de Processo"}
-            </h2>
-            <p className="mt-1 text-sm text-slate-500">
-              {missingSheetTool
-                ? "A ferramenta está no planejamento, mas ainda não possui receita ativa. Você pode começar em branco ou copiar o setup de uma ficha existente."
-                : "Escolha ferramenta e corte para unir receita e programação ativa."}
-            </p>
-            {missingSheetTool && (
-              <Button
-                type="button"
-                className="mt-4 bg-orange-500 font-semibold hover:bg-orange-600"
-                onClick={() =>
-                  router.push(
-                    `/engenharia?nova=${encodeURIComponent(missingSheetTool)}&origem=producao`,
-                  )
-                }
-              >
-                <FilePlus2 className="size-4" />
-                Criar ficha de processo
-              </Button>
-            )}
-          </div>
+      {recalculationNeeded && (
+        <div className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-950">
+          <span><strong>Programação precisa ser recalculada.</strong> O saldo real da ordem já foi atualizado.</span>
+          <Button size="sm" variant="outline" onClick={() => router.push("/carga-maquina")}>Recalcular Carga Máquina</Button>
         </div>
+      )}
+      {!selected ? (
+        <ProductionReadinessDashboard
+          orders={readinessOrders}
+          settings={readinessSettings}
+          tools={readinessTools}
+          loading={readinessLoading}
+          error={readinessError}
+          updatedAt={readinessUpdatedAt}
+          canManageTests={role === "admin" || role === "pcp"}
+          onRefresh={() => void loadProductionReadiness()}
+          onToggleTest={(ids, required) => void toggleReadinessTests(ids, required)}
+          missingSheetTool={missingSheetTool}
+          onCreateSheet={() =>
+            router.push(
+              `/engenharia?nova=${encodeURIComponent(missingSheetTool)}&origem=producao`,
+            )
+          }
+        />
       ) : (
         <div className="grid min-h-0 flex-1 gap-2 overflow-hidden md:grid-cols-[1.08fr_.92fr]">
           <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-white shadow-sm">
@@ -1547,13 +1925,16 @@ export function ProductionCockpit() {
                       className="h-7 bg-emerald-600 text-[10px] font-bold hover:bg-emerald-700"
                     >
                       <SquareCheckBig className="size-3.5" />
-                      Informar produzido e encerrar
+                      Apontar resultado
                     </Button>
                   </div>
                 ) : (
                   <Button
                     size="sm"
-                    onClick={() => void startProduction()}
+                    onClick={() => {
+                      if (chosen.every((order) => order.status === "paused")) void resumeProduction();
+                      else requestStartProduction();
+                    }}
                     disabled={savingStatus}
                     className="h-7 bg-orange-500 text-[10px] hover:bg-orange-600"
                   >
@@ -1769,6 +2150,10 @@ export function ProductionCockpit() {
           onSelectMany={selectPlanSearchOrders}
           onClose={() => setPlanSearchOpen(false)}
           onConfirm={() => void loadPlanCampaign()}
+          allowedMachineCodes={userMachineCodes ?? []}
+          filterStorageKey={userId}
+          canEditSequence={canEditWorkSequence}
+          onReorder={applyWorkSequence}
         />
       )}
       {preheatedOrders && (
@@ -1777,6 +2162,18 @@ export function ProductionCockpit() {
           onClose={() => setPreheatedOrders(null)}
           onConfirm={registerPreheatedTool}
           onReady={() => void continueAfterPreheatedConfirmation()}
+        />
+      )}
+      {chosen.length > 0 && startConfirmationOpen && (
+        <StartProductionDialog
+          orders={chosen}
+          heatingLocations={planHeatingLocations}
+          justification={earlyStartJustification}
+          error={startConfirmationError}
+          saving={savingStatus}
+          onJustificationChange={setEarlyStartJustification}
+          onClose={() => !savingStatus && setStartConfirmationOpen(false)}
+          onConfirm={() => void confirmStartProduction()}
         />
       )}
       {chosen.length > 0 && completionOpen && (
@@ -1790,8 +2187,8 @@ export function ProductionCockpit() {
           }
           saving={savingStatus}
           onClose={() => setCompletionOpen(false)}
-          onConfirm={(kg, pieces, notes, productivity) =>
-            void completeProduction(kg, pieces, notes, productivity)
+          onConfirm={(kg, pieces, notes, productivity, outcome, partialReason) =>
+            void completeProduction(kg, pieces, notes, productivity, outcome, partialReason)
           }
         />
       )}
@@ -1804,6 +2201,266 @@ export function ProductionCockpit() {
           onConfirm={(input) => void recordStoppage(input)}
         />
       )}
+    </div>
+  );
+}
+
+type ProductionReadinessDashboardProps = {
+  orders: Order[];
+  settings: ProductionReadinessSetting[];
+  tools: ProductionReadinessTool[];
+  loading: boolean;
+  error: string;
+  updatedAt: string | null;
+  canManageTests: boolean;
+  onRefresh: () => void;
+  onToggleTest: (orderIds: string[], required: boolean) => void;
+  missingSheetTool: string;
+  onCreateSheet: () => void;
+};
+
+function ProductionReadinessDashboard({
+  orders,
+  settings,
+  tools,
+  loading,
+  error,
+  updatedAt,
+  canManageTests,
+  onRefresh,
+  onToggleTest,
+  missingSheetTool,
+  onCreateSheet,
+}: ProductionReadinessDashboardProps) {
+  const settingsByMachine = useMemo(
+    () => new Map(settings.map((setting) => [setting.machine_code, setting])),
+    [settings],
+  );
+  const toolsByCode = useMemo(
+    () => new Map(tools.map((tool) => [normalizeCode(tool.code), tool])),
+    [tools],
+  );
+  const machines = useMemo(() => {
+    const codes = new Set(["18", "19"]);
+    orders.forEach((order) => codes.add(order.machine_code));
+    settings.forEach((setting) => codes.add(setting.machine_code));
+    return Array.from(codes).filter(Boolean).sort();
+  }, [orders, settings]);
+
+  return (
+    <div className="min-h-0 flex-1 overflow-auto rounded-xl border bg-slate-50/70 p-3 sm:p-4">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <BarChart3 className="size-5 text-orange-500" />
+            <h2 className="font-heading text-lg font-bold text-slate-950">
+              Resumo do dia por prensa
+            </h2>
+          </div>
+          <p className="mt-1 text-xs text-slate-500">
+            Indicadores da fila ativa para preparar tarugos, ferramentas e testes antes de abrir uma ficha.
+            Atualiza automaticamente a cada 30 segundos.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {updatedAt && (
+            <span className="text-[10px] text-slate-400">
+              Atualizado às {new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit" }).format(new Date(updatedAt))}
+            </span>
+          )}
+          <Button type="button" variant="outline" size="sm" onClick={onRefresh} disabled={loading}>
+            <RefreshCw className={loading ? "size-3.5 animate-spin" : "size-3.5"} />
+            Atualizar
+          </Button>
+        </div>
+      </div>
+
+      {missingSheetTool && (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+          <span><strong>{missingSheetTool}</strong> está na programação, mas ainda não possui ficha ativa.</span>
+          <Button type="button" size="sm" className="bg-orange-500 font-semibold hover:bg-orange-600" onClick={onCreateSheet}>
+            <FilePlus2 className="size-3.5" /> Criar ficha
+          </Button>
+        </div>
+      )}
+
+      {error && (
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {loading && !orders.length ? (
+        <div className="grid gap-3 xl:grid-cols-2">
+          {["18", "19"].map((machine) => (
+            <div key={machine} className="h-64 animate-pulse rounded-xl border bg-white" />
+          ))}
+        </div>
+      ) : (
+        <div className="grid gap-3 xl:grid-cols-2">
+          {machines.map((machineCode) => (
+            <ProductionReadinessPressCard
+              key={machineCode}
+              machineCode={machineCode}
+              orders={orders.filter((order) => order.machine_code === machineCode)}
+              setting={settingsByMachine.get(machineCode)}
+              toolsByCode={toolsByCode}
+              canManageTests={canManageTests}
+              onToggleTest={onToggleTest}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProductionReadinessPressCard({
+  machineCode,
+  orders,
+  setting,
+  toolsByCode,
+  canManageTests,
+  onToggleTest,
+}: {
+  machineCode: string;
+  orders: Order[];
+  setting?: ProductionReadinessSetting;
+  toolsByCode: Map<string, ProductionReadinessTool>;
+  canManageTests: boolean;
+  onToggleTest: (orderIds: string[], required: boolean) => void;
+}) {
+  const groupedTools = useMemo(() => {
+    const groups = new Map<string, Order[]>();
+    orders.forEach((order) => {
+      const code = order.tool_code || "Sem ferramenta";
+      groups.set(code, [...(groups.get(code) ?? []), order]);
+    });
+    return Array.from(groups, ([code, toolOrders]) => ({ code, orders: toolOrders }));
+  }, [orders]);
+  const liquidKg = orders.reduce(
+    (total, order) => total + Math.max(0, numeric(order.target_kg) - numeric(order.produced_kg)),
+    0,
+  );
+  const efficiency = Math.min(1, Math.max(0.01, numeric(setting?.extrusion_efficiency, 0.9)));
+  const grossKg = liquidKg / efficiency;
+  const toolChangeMinutes = Math.max(0, numeric(setting?.tool_change_minutes, 1));
+  const billetWeight = numeric(setting?.billet_bar_weight_kg, 300);
+  const barsByAlloy = useMemo(() => {
+    const totals = new Map<string, number>();
+    orders.forEach((order) => {
+      const alloy = order.alloy_code || "Liga não informada";
+      totals.set(alloy, (totals.get(alloy) ?? 0) + Math.max(0, numeric(order.target_kg) - numeric(order.produced_kg)) / efficiency);
+    });
+    return Array.from(totals, ([alloy, kg]) => ({ alloy, kg, bars: billetWeight > 0 ? Math.ceil(kg / billetWeight) : null }));
+  }, [orders, efficiency, billetWeight]);
+  const testCandidates = groupedTools.filter(({ code }) => {
+    const weight = toolsByCode.get(normalizeCode(code))?.tool_weight_kg;
+    return weight != null && weight <= 50;
+  });
+  const markedTests = groupedTools.filter(({ orders: toolOrders }) => toolOrders.some((order) => order.requires_test));
+  const inProgress = orders.filter((order) => order.status === "in_progress").length;
+  const empty = orders.length === 0;
+  const pressLabel = machineCode.includes(".") ? machineCode : `${machineCode.slice(0, -1)}.${machineCode.slice(-1)}`;
+
+  return (
+    <section className="overflow-hidden rounded-xl border bg-white shadow-sm">
+      <div className="flex items-center justify-between border-b bg-slate-950 px-3 py-2 text-white">
+        <div className="flex items-center gap-2">
+          <Factory className="size-4 text-orange-400" />
+          <h3 className="font-heading text-base font-bold">Prensa {pressLabel}</h3>
+        </div>
+        <span className="text-[10px] font-semibold text-slate-300">
+          {orders.length} ferramenta(s) na fila{inProgress ? ` · ${inProgress} em produção` : ""}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-3">
+        <ReadinessMetric icon={<Wrench />} label="Ferramentas previstas" value={format(groupedTools.length)} />
+        <ReadinessMetric icon={<Scale />} label="Volume líquido esperado" value={`${format(liquidKg, 1)} kg`} />
+        <ReadinessMetric icon={<Gauge />} label="Volume bruto estimado" value={`${format(grossKg, 1)} kg`} />
+        <ReadinessMetric icon={<Timer />} label="Tempo morto de trocas" value={`${format(toolChangeMinutes * Math.max(groupedTools.length - 1, 0))} min`} detail={`${format(toolChangeMinutes, 0)} min por troca`} />
+        <ReadinessMetric icon={<ClipboardCheck />} label="Testes ≤ 50 kg" value={format(testCandidates.length)} detail={markedTests.length ? `${format(markedTests.length)} marcado(s) pelo PCP` : "Nenhum marcado"} />
+        <ReadinessMetric icon={<CalendarDays />} label="Ordens restantes" value={format(orders.length)} detail={empty ? "Sem programação ativa" : "Saldo ainda não produzido"} />
+      </div>
+
+      <div className="grid gap-3 border-t px-3 py-3 md:grid-cols-[1fr_1fr]">
+        <div>
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-xs font-bold text-slate-700">Tarugos para separar por liga</p>
+            <span className="text-[10px] text-slate-400">{format(billetWeight, 1)} kg/barra{setting ? "" : " · padrão"}</span>
+          </div>
+          {barsByAlloy.length ? (
+            <div className="space-y-1.5">
+              {barsByAlloy.map(({ alloy, kg, bars }) => (
+                <div key={alloy} className="flex items-center justify-between rounded-lg bg-slate-50 px-2 py-1.5 text-xs">
+                  <span className="font-semibold text-slate-700">{alloy}</span>
+                  <span className="text-right text-slate-500">{format(kg, 1)} kg · <strong className="text-slate-900">{bars == null ? "—" : `${format(bars)} barras`}</strong></span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="rounded-lg bg-slate-50 px-2 py-3 text-xs text-slate-500">Nenhum volume restante na fila.</p>
+          )}
+        </div>
+
+        <div>
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-xs font-bold text-slate-700">Testes programados pelo PCP</p>
+            <span className="text-[10px] text-slate-400">até 50 kg</span>
+          </div>
+          {testCandidates.length ? (
+            <div className="space-y-1.5">
+              {testCandidates.map(({ code, orders: toolOrders }) => {
+                const tool = toolsByCode.get(normalizeCode(code));
+                const checked = toolOrders.some((order) => order.requires_test);
+                return (
+                  <label key={code} className="flex cursor-pointer items-center gap-2 rounded-lg border px-2 py-1.5 text-xs hover:bg-orange-50">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={!canManageTests}
+                      onChange={(event) => onToggleTest(toolOrders.map((order) => order.id), event.target.checked)}
+                      className="size-3.5 accent-orange-500"
+                    />
+                    <span className="min-w-0 flex-1 truncate font-mono font-bold text-orange-600">{code}</span>
+                    <span className="text-slate-500">{format(numeric(tool?.tool_weight_kg), 1)} kg</span>
+                  </label>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="rounded-lg bg-slate-50 px-2 py-3 text-xs text-slate-500">Cadastre o peso físico para sugerir testes.</p>
+          )}
+          {!canManageTests && testCandidates.length > 0 && (
+            <p className="mt-1 text-[10px] text-slate-400">Somente PCP pode marcar ou retirar testes.</p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ReadinessMetric({
+  icon,
+  label,
+  value,
+  detail,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  detail?: string;
+}) {
+  return (
+    <div className="min-w-0 rounded-lg border bg-slate-50/80 p-2">
+      <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-400 [&_svg]:size-3.5 [&_svg]:text-orange-500">
+        {icon}
+        <span className="truncate">{label}</span>
+      </div>
+      <p className="mt-1 truncate text-base font-black text-slate-950">{value}</p>
+      {detail && <p className="truncate text-[10px] text-slate-500">{detail}</p>}
     </div>
   );
 }
@@ -2319,6 +2976,10 @@ function PlanCampaignSearch({
   onSelectMany,
   onClose,
   onConfirm,
+  allowedMachineCodes,
+  canEditSequence,
+  onReorder,
+  filterStorageKey,
 }: {
   query: string;
   orders: Order[];
@@ -2332,11 +2993,86 @@ function PlanCampaignSearch({
   onSelectMany: (ids: string[]) => void;
   onClose: () => void;
   onConfirm: () => void;
+  allowedMachineCodes: string[];
+  filterStorageKey: string;
+  canEditSequence: boolean;
+  onReorder: (orderIds: string[], password: string, reason: string) => Promise<void>;
 }) {
+  const [pressFilter, setPressFilter] = useState("all");
+  const [pressFilterReady, setPressFilterReady] = useState(false);
+  const [sequenceEditorOpen, setSequenceEditorOpen] = useState(false);
+  const [sequenceUnlocked, setSequenceUnlocked] = useState(false);
+  const [sequencePassword, setSequencePassword] = useState("");
+  const [sequenceReason, setSequenceReason] = useState("");
+  const [sequenceSaving, setSequenceSaving] = useState(false);
+  const [sequenceError, setSequenceError] = useState("");
+  const [sequenceNotice, setSequenceNotice] = useState("");
+  const [dragOverOrderId, setDragOverOrderId] = useState<string | null>(null);
+  const dragOrderIdRef = useRef<string | null>(null);
+  const pressFilterStorageKey = `tecnomes:plan-explorer:press-filter:${filterStorageKey}`;
+
+  useEffect(() => {
+    let active = true;
+    let savedFilter: string | null = null;
+    try {
+      savedFilter = window.localStorage.getItem(pressFilterStorageKey);
+    } catch {
+      // A private browsing policy may block localStorage; keep the default filter.
+    }
+    queueMicrotask(() => {
+      if (!active) return;
+      if (savedFilter) setPressFilter(savedFilter);
+      setPressFilterReady(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, [pressFilterStorageKey]);
+
+  useEffect(() => {
+    if (!pressFilterReady) return;
+    try {
+      window.localStorage.setItem(pressFilterStorageKey, pressFilter);
+    } catch {
+      // The filter remains available for the current session when persistence is unavailable.
+    }
+  }, [pressFilter, pressFilterReady, pressFilterStorageKey]);
+  const [draftSequence, setDraftSequence] = useState<string[]>(() =>
+    [...allOrders]
+      .sort((left, right) => left.machine_code.localeCompare(right.machine_code) || left.sequence - right.sequence || left.id.localeCompare(right.id))
+      .map((order) => order.id),
+  );
+  const initialSequence = useMemo(
+    () => [...allOrders]
+      .sort((left, right) => left.machine_code.localeCompare(right.machine_code) || left.sequence - right.sequence || left.id.localeCompare(right.id))
+      .map((order) => order.id),
+    [allOrders],
+  );
+  const orderById = useMemo(() => new Map(allOrders.map((order) => [order.id, order])), [allOrders]);
+  const sequenceByOrderId = useMemo(() => {
+    const positions = new Map<string, number>();
+    const nextByMachine = new Map<string, number>();
+    for (const id of draftSequence) {
+      const order = orderById.get(id);
+      if (!order) continue;
+      const next = (nextByMachine.get(order.machine_code) ?? 0) + 1;
+      nextByMachine.set(order.machine_code, next);
+      positions.set(id, next);
+    }
+    return positions;
+  }, [draftSequence, orderById]);
+  const sequenceChangedCount = useMemo(
+    () => allOrders.filter((order) => sequenceByOrderId.get(order.id) !== order.sequence).length,
+    [allOrders, sequenceByOrderId],
+  );
+  const availablePresses = useMemo(
+    () => [...new Set(allOrders.map((order) => order.machine_code).filter((code) => allowedMachineCodes.length === 0 || allowedMachineCodes.includes(code)))].sort(),
+    [allOrders, allowedMachineCodes],
+  );
+  const effectivePressFilter = pressFilter === "all" || availablePresses.includes(pressFilter) ? pressFilter : "all";
   const selectedOrders = allOrders.filter((order) => selected.includes(order.id));
-  const plans = [
-    ...new Set(orders.map((order) => order.plan_code || "Sem Plano")),
-  ];
+  const filteredOrders = orders.filter((order) => effectivePressFilter === "all" || order.machine_code === effectivePressFilter);
+  const plans = [...new Set(filteredOrders.map((order) => order.plan_code || "Sem Plano"))];
   const selectedPlans = new Set(
     selectedOrders.map((order) => order.plan_code || "Sem Plano"),
   ).size;
@@ -2348,6 +3084,93 @@ function PlanCampaignSearch({
     (sum, order) => sum + numeric(order.target_quantity),
     0,
   );
+  const activeSimulationRefs = useMemo(() => {
+    const refs = new Map<string, Set<number>>();
+    for (const order of allOrders) {
+      if (order.active_sequence_source !== "simulation" || !order.active_sequence_scenario_id) continue;
+      const versions = refs.get(order.active_sequence_scenario_id) ?? new Set<number>();
+      if (order.active_sequence_version != null) versions.add(order.active_sequence_version);
+      refs.set(order.active_sequence_scenario_id, versions);
+    }
+    return [...refs.entries()]
+      .map(([scenarioId, versions]) => ({ scenarioId, versions: [...versions].sort((left, right) => left - right) }))
+      .sort((left, right) => left.scenarioId.localeCompare(right.scenarioId));
+  }, [allOrders]);
+  const approvedVersions = [...new Set(allOrders.map((order) => order.active_sequence_source === "simulation" ? order.active_sequence_version : null).filter((version): version is number => version != null))];
+  const hasApprovedWorkSequence = activeSimulationRefs.length > 0 || approvedVersions.length > 0;
+  function replaceMachineMovableOrder(machineCode: string, nextMovableIds: string[]) {
+    const next = [...draftSequence];
+    const machineIndexes = next.reduce<number[]>((indexes, id, index) => {
+      if (orderById.get(id)?.machine_code === machineCode) indexes.push(index);
+      return indexes;
+    }, []);
+    const movableIndexes = machineIndexes.filter((index) => orderById.get(next[index])?.status !== "in_progress");
+    for (const [position, index] of movableIndexes.entries()) {
+      const nextId = nextMovableIds[position];
+      if (nextId) next[index] = nextId;
+    }
+    setDraftSequence(next);
+    setSequenceNotice("");
+  }
+  function moveOrder(orderId: string, direction: -1 | 1) {
+    if (!sequenceUnlocked) return;
+    const order = orderById.get(orderId);
+    if (!order || order.status === "in_progress") return;
+    const movableOrders = draftSequence
+      .filter((id) => orderById.get(id)?.machine_code === order.machine_code)
+      .filter((id) => orderById.get(id)?.status !== "in_progress");
+    const currentIndex = movableOrders.indexOf(orderId);
+    const targetId = movableOrders[currentIndex + direction];
+    if (!targetId) return;
+    const nextMovableIds = [...movableOrders];
+    nextMovableIds[currentIndex] = targetId;
+    nextMovableIds[currentIndex + direction] = orderId;
+    replaceMachineMovableOrder(order.machine_code, nextMovableIds);
+  }
+  function canDropOrder(orderId: string, targetId: string) {
+    if (!sequenceUnlocked || orderId === targetId) return false;
+    const order = orderById.get(orderId);
+    const target = orderById.get(targetId);
+    return Boolean(
+      order && target &&
+      order.machine_code === target.machine_code &&
+      order.status !== "in_progress" &&
+      target.status !== "in_progress",
+    );
+  }
+  function reorderByDrag(targetId: string) {
+    const orderId = dragOrderIdRef.current;
+    if (!orderId || !canDropOrder(orderId, targetId)) return;
+    const order = orderById.get(orderId);
+    if (!order) return;
+    const movableOrders = draftSequence
+      .filter((id) => orderById.get(id)?.machine_code === order.machine_code)
+      .filter((id) => orderById.get(id)?.status !== "in_progress");
+    const sourceIndex = movableOrders.indexOf(orderId);
+    const targetIndex = movableOrders.indexOf(targetId);
+    if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
+    const nextMovableIds = [...movableOrders];
+    nextMovableIds.splice(sourceIndex, 1);
+    nextMovableIds.splice(targetIndex, 0, orderId);
+    replaceMachineMovableOrder(order.machine_code, nextMovableIds);
+  }
+  async function saveSequence() {
+    if (!sequenceUnlocked || sequenceChangedCount === 0 || sequenceSaving) return;
+    setSequenceSaving(true);
+    setSequenceError("");
+    try {
+      await onReorder(draftSequence, sequencePassword, sequenceReason.trim());
+      setSequenceNotice("Sequência aplicada e programação marcada para nova conferência.");
+      setSequenceEditorOpen(false);
+      setSequenceUnlocked(false);
+      setSequencePassword("");
+      setSequenceReason("");
+    } catch (cause) {
+      setSequenceError(cause instanceof Error ? cause.message : "Não foi possível aplicar a sequência.");
+    } finally {
+      setSequenceSaving(false);
+    }
+  }
   const heatingByOrder = new Map<string, PlanHeatingLocation>();
   const heatingByToolMachine = new Map<string, PlanHeatingLocation>();
   for (const cycle of heatingLocations) {
@@ -2371,8 +3194,32 @@ function PlanCampaignSearch({
                 Explorar ferramentas nos Planos ativos
               </h2>
               <p className="text-xs text-slate-500">
-                Consulte toda a fila, encontre por parte do código e veja onde a ferramenta está.
+                Consulte a fila operacional por prensa, encontre por parte do código e veja onde a ferramenta está.
               </p>
+              {hasApprovedWorkSequence ? (
+                <div className="mt-1 flex flex-wrap items-center gap-1.5" aria-label="Simulações ativas">
+                  <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[9px] font-bold text-emerald-800">
+                    Sequência de trabalho · Simplificada aprovada
+                  </span>
+                  {activeSimulationRefs.length > 0 ? activeSimulationRefs.map(({ scenarioId, versions }) => (
+                    <span
+                      key={scenarioId}
+                      title={`ID completo da simulação: ${scenarioId}`}
+                      className="rounded-full bg-violet-100 px-2 py-0.5 font-mono text-[9px] font-bold text-violet-800"
+                    >
+                      {simulationDisplayId(scenarioId)}{versions.length ? ` · v${versions.join(", v")}` : ""}
+                    </span>
+                  )) : (
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-bold text-amber-800">
+                      versão ativa sem ID de cenário
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <span className="mt-1 inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-bold text-slate-600">
+                  Sequência original · nenhum cenário aprovado
+                </span>
+              )}
             </div>
           </div>
           <button
@@ -2393,21 +3240,83 @@ function PlanCampaignSearch({
               onChange={(event) => onQueryChange(event.target.value)}
               className="h-11 bg-white pl-10 text-base font-bold"
               placeholder="Ferramenta, Plano, cliente ou ordem — ex.: T25"
+              name="plan-search-query"
+              autoComplete="off"
             />
           </label>
-          <Button
-            onClick={query ? () => onQueryChange("") : onRefresh}
-            disabled={loading}
-            variant="outline"
-            className="h-11 min-w-32 font-bold"
-          >
-            {loading ? <Loader2 className="animate-spin" /> : query ? <X /> : <RefreshCw />}
-            {query ? "Limpar" : "Atualizar"}
-          </Button>
+          <div className="flex flex-wrap justify-end gap-2">
+            {availablePresses.length > 1 && (
+              <label className="flex h-11 items-center gap-2 rounded-lg border bg-white px-3 text-xs font-bold text-slate-600">
+                <span>Prensa</span>
+                <select value={effectivePressFilter} onChange={(event) => setPressFilter(event.target.value)} className="bg-transparent text-sm font-black text-slate-950 outline-none">
+                  <option value="all">Todas</option>
+                  {availablePresses.map((machineCode) => <option key={machineCode} value={machineCode}>{machineCode === "18" ? "1.8" : machineCode === "19" ? "1.9" : machineCode}</option>)}
+                </select>
+              </label>
+            )}
+            {canEditSequence && (
+              <Button
+                type="button"
+                variant={sequenceEditorOpen ? "default" : "outline"}
+                className={`h-11 font-bold ${sequenceEditorOpen ? "bg-slate-950 hover:bg-slate-800" : ""}`}
+                onClick={() => {
+                  const nextOpen = !sequenceEditorOpen;
+                  setSequenceEditorOpen(nextOpen);
+                  if (nextOpen) {
+                    setDraftSequence(initialSequence);
+                    setSequenceUnlocked(false);
+                    setSequencePassword("");
+                    setSequenceReason("");
+                  }
+                  setSequenceError("");
+                  setSequenceNotice("");
+                }}
+              >
+                <LockKeyhole className="size-4" /> Ajustar sequência
+              </Button>
+            )}
+            <Button
+              onClick={query ? () => onQueryChange("") : onRefresh}
+              disabled={loading}
+              variant="outline"
+              className="h-11 min-w-32 font-bold"
+            >
+              {loading ? <Loader2 className="animate-spin" /> : query ? <X /> : <RefreshCw />}
+              {query ? "Limpar" : "Atualizar"}
+            </Button>
+          </div>
         </div>
 
+        {sequenceEditorOpen && (
+          <div className="shrink-0 border-b border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-950">
+            {!sequenceUnlocked ? (
+              <div className="grid gap-3 md:grid-cols-[.7fr_1fr_auto] md:items-end">
+                <label className="text-xs font-bold">Senha de liberação
+                  <Input type="password" value={sequencePassword} onChange={(event) => setSequencePassword(event.target.value)} className="mt-1 h-10 bg-white" placeholder="Sua senha" name="sequence-release-password" autoComplete="new-password" />
+                </label>
+                <label className="text-xs font-bold">Motivo do ajuste
+                  <Input value={sequenceReason} onChange={(event) => setSequenceReason(event.target.value)} className="mt-1 h-10 bg-white" placeholder="Ex.: antecipar a ferramenta liberada" name="sequence-adjustment-reason" autoComplete="off" />
+                  <span className="mt-1 block text-[11px] font-normal text-slate-500">
+                    {sequenceReason.trim().length < SEQUENCE_REASON_MIN_LENGTH
+                      ? `Informe pelo menos ${SEQUENCE_REASON_MIN_LENGTH} caracteres.`
+                      : "Motivo válido para registrar o ajuste."}
+                  </span>
+                </label>
+                <Button type="button" disabled={!sequencePassword || sequenceReason.trim().length < SEQUENCE_REASON_MIN_LENGTH} onClick={() => { setSequenceUnlocked(true); setSequenceError(""); }} className="h-10 bg-violet-700 font-bold hover:bg-violet-800">Liberar edição</Button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div><strong>Edição liberada.</strong> Use as setas ou segure o ícone <GripVertical className="mx-1 inline size-4 align-text-bottom" /> para arrastar cada item dentro da própria prensa; ordens em produção permanecem bloqueadas. Ao aplicar, a fila será reindexada por prensa e a Carga Máquina será marcada para recalcular horários, forno e esperas.<span className="ml-2 font-bold">{sequenceChangedCount} alteração(ões)</span></div>
+                <div className="flex gap-2"><Button type="button" variant="outline" onClick={() => { setSequenceUnlocked(false); setSequencePassword(""); setSequenceReason(""); setDraftSequence(initialSequence); }}>Cancelar</Button><Button type="button" disabled={sequenceChangedCount === 0 || sequenceSaving} onClick={() => void saveSequence()} className="bg-violet-700 font-bold hover:bg-violet-800">{sequenceSaving ? <Loader2 className="animate-spin" /> : <RefreshCw />} Recalcular e aplicar</Button></div>
+              </div>
+            )}
+            {sequenceError && <p role="alert" className="mt-2 font-semibold text-red-700">{sequenceError}</p>}
+            {sequenceNotice && <p role="status" className="mt-2 font-semibold text-emerald-700">{sequenceNotice}</p>}
+          </div>
+        )}
+
         <div className="grid shrink-0 grid-cols-2 gap-px border-b bg-slate-200 sm:grid-cols-4">
-          <CampaignSummary label="Itens encontrados" value={orders.length} />
+          <CampaignSummary label="Itens encontrados" value={filteredOrders.length} />
           <CampaignSummary label="Planos encontrados" value={plans.length} />
           <CampaignSummary
             label="Itens selecionados"
@@ -2433,9 +3342,10 @@ function PlanCampaignSearch({
             </div>
           )}
           {plans.map((plan) => {
-            const rows = orders.filter(
+            const rows = filteredOrders.filter(
               (order) => (order.plan_code || "Sem Plano") === plan,
             );
+            const pressCodes = [...new Set(rows.map((order) => order.machine_code))].sort();
             return (
               <section
                 key={plan}
@@ -2447,9 +3357,7 @@ function PlanCampaignSearch({
                     <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-bold">
                       {rows.length} item(ns)
                     </span>
-                    <span className="text-[10px] text-slate-300">
-                      FIFO · prazo mais próximo primeiro
-                    </span>
+                    <span className="text-[10px] text-slate-300">Sequência operacional por prensa</span>
                   </div>
                   <button
                     onClick={() => onSelectMany(rows.map((order) => order.id))}
@@ -2458,19 +3366,12 @@ function PlanCampaignSearch({
                     Selecionar Plano
                   </button>
                 </div>
-                <div className="grid grid-cols-[42px_1fr_.7fr_.45fr_.72fr_.72fr_.68fr_.55fr_.55fr_1fr] border-b bg-slate-100 px-3 py-2 text-[9px] font-bold uppercase tracking-wide text-slate-500">
-                  <span />
-                  <span>Ordem</span>
-                  <span>Ferramenta</span>
-                  <span>Seq.</span>
-                  <span>Quantidade</span>
-                  <span>Saldo</span>
-                  <span>Prazo</span>
-                  <span>Liga</span>
-                  <span>Prensa</span>
-                  <span>Preparação</span>
-                </div>
-                {rows.map((order) => {
+                {pressCodes.map((machineCode) => {
+                  const pressRows = rows.filter((order) => order.machine_code === machineCode).sort((left, right) => (sequenceByOrderId.get(left.id) ?? left.sequence) - (sequenceByOrderId.get(right.id) ?? right.sequence));
+                  return <div key={machineCode} className="border-b last:border-b-0">
+                    <div className="flex items-center justify-between bg-orange-50 px-3 py-2"><strong className="text-xs text-orange-950">Prensa {machineCode === "18" ? "1.8" : machineCode === "19" ? "1.9" : machineCode}</strong><span className="text-[10px] font-semibold text-orange-800">{pressRows.length} ordem(ns) · sequência operacional atual</span></div>
+                    <div className="grid grid-cols-[42px_1fr_.7fr_.45fr_.72fr_.72fr_.68fr_.55fr_.55fr_1fr] border-y bg-slate-100 px-3 py-2 text-[9px] font-bold uppercase tracking-wide text-slate-500"><span /><span>Ordem</span><span>Ferramenta</span><span>Seq.</span><span>Quantidade</span><span>Saldo</span><span>Prazo</span><span>Liga</span><span>Prensa</span><span>Preparação</span></div>
+                {pressRows.map((order) => {
                   const checked = selected.includes(order.id);
                   const inProgress = order.status === "in_progress";
                   const target =
@@ -2483,18 +3384,41 @@ function PlanCampaignSearch({
                       : numeric(order.produced_quantity);
                   const heating = heatingByOrder.get(order.id) ?? heatingByToolMachine.get(`${normalizeCode(order.tool_code)}|${order.machine_code}`);
                   return (
-                    <button
+                    <div
                       key={order.id}
+                      role="button"
+                      tabIndex={0}
                       onClick={() => onToggle(order.id)}
+                      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onToggle(order.id); } }}
+                      onDragOver={(event) => {
+                        if (canDropOrder(dragOrderIdRef.current ?? "", order.id)) {
+                          event.preventDefault();
+                          event.dataTransfer.dropEffect = "move";
+                          setDragOverOrderId(order.id);
+                        }
+                      }}
+                      onDragLeave={() => setDragOverOrderId((current) => current === order.id ? null : current)}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        reorderByDrag(order.id);
+                        dragOrderIdRef.current = null;
+                        setDragOverOrderId(null);
+                      }}
                       className={`grid w-full grid-cols-[42px_1fr_.7fr_.45fr_.72fr_.72fr_.68fr_.55fr_.55fr_1fr] items-center border-b px-3 py-2.5 text-left text-xs last:border-b-0 ${
                         checked
                           ? "bg-orange-50"
                           : inProgress
-                            ? "cursor-not-allowed bg-amber-50/50"
-                            : "hover:bg-slate-50"
+                            ? "bg-amber-50/50 hover:bg-amber-100"
+                            : dragOverOrderId === order.id
+                              ? "bg-violet-50 ring-2 ring-inset ring-violet-400"
+                              : "hover:bg-slate-50"
                       }`}
                     >
-                      <span
+                      <button
+                        type="button"
+                        aria-label={`Selecionar ordem ${order.order_number}`}
+                        onClick={(event) => { event.stopPropagation(); onToggle(order.id); }}
                         className={`grid size-5 place-items-center rounded ${
                           checked
                             ? "bg-orange-500 text-white"
@@ -2502,7 +3426,7 @@ function PlanCampaignSearch({
                         }`}
                       >
                         {checked && <Check className="size-3.5" />}
-                      </span>
+                      </button>
                       <span className="min-w-0">
                         <b className="block truncate">{order.order_number}</b>
                         <span className="text-[9px] text-slate-400">
@@ -2512,7 +3436,7 @@ function PlanCampaignSearch({
                       <b className="font-mono text-orange-600">
                         {order.tool_code}
                       </b>
-                      <span>{format(order.sequence)}</span>
+                      <span className="font-black text-slate-700">{format(sequenceByOrderId.get(order.id) ?? order.sequence)}</span>
                       <b>
                         {format(target, order.demand_unit === "kg" ? 1 : 0)}{" "}
                         {unitLabel(order.demand_unit)}
@@ -2532,13 +3456,46 @@ function PlanCampaignSearch({
                         P{order.machine_code}
                         {inProgress && (
                           <span className="rounded bg-amber-100 px-1 py-0.5 text-[8px] text-amber-800">
-                            EM PRODUÇÃO
+                            EM PRODUÇÃO · ACESSAR
                           </span>
                         )}
                       </span>
-                      <HeatingLocationBadge cycle={heating} />
-                    </button>
+                      <span className="flex items-center justify-between gap-2">
+                        <HeatingLocationBadge cycle={heating} />
+                        {sequenceUnlocked && (
+                          <span className="flex shrink-0 items-center gap-1" onClick={(event) => event.stopPropagation()}>
+                            <span
+                              role="button"
+                              tabIndex={inProgress ? -1 : 0}
+                              draggable={!inProgress}
+                              aria-label={`Arrastar ${order.tool_code} na sequência`}
+                              title={inProgress ? "Ordem em produção: posição bloqueada" : "Segure e arraste para reordenar"}
+                              onDragStart={(event) => {
+                                event.stopPropagation();
+                                if (inProgress) {
+                                  event.preventDefault();
+                                  return;
+                                }
+                                dragOrderIdRef.current = order.id;
+                                event.dataTransfer.effectAllowed = "move";
+                                event.dataTransfer.setData("text/plain", order.id);
+                              }}
+                              onDragEnd={() => {
+                                dragOrderIdRef.current = null;
+                                setDragOverOrderId(null);
+                              }}
+                              className={`grid size-6 place-items-center rounded text-slate-400 ${inProgress ? "cursor-not-allowed opacity-35" : "cursor-grab hover:bg-violet-100 hover:text-violet-700 active:cursor-grabbing"}`}
+                            >
+                              <GripVertical className="size-4" />
+                            </span>
+                            <button type="button" title="Subir na sequência" aria-label={`Subir ${order.tool_code}`} disabled={inProgress || (sequenceByOrderId.get(order.id) ?? 1) <= 1} onClick={() => moveOrder(order.id, -1)} className="grid size-6 place-items-center rounded border bg-white text-violet-700 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-30"><ArrowUp className="size-3.5" /></button>
+                            <button type="button" title="Descer na sequência" aria-label={`Descer ${order.tool_code}`} disabled={inProgress} onClick={() => moveOrder(order.id, 1)} className="grid size-6 place-items-center rounded border bg-white text-violet-700 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-30"><ArrowDown className="size-3.5" /></button>
+                          </span>
+                        )}
+                      </span>
+                    </div>
                   );
+                })}</div>;
                 })}
               </section>
             );
@@ -2581,6 +3538,89 @@ function HeatingLocationBadge({ cycle }: { cycle?: PlanHeatingLocation }) {
     return <span className="inline-flex w-fit items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-[9px] font-black uppercase text-emerald-700"><CheckCircle2 className="size-3" />Liberada</span>;
   }
   return <span className="inline-flex w-fit items-center gap-1 rounded-full bg-orange-50 px-2 py-1 text-[9px] font-bold text-orange-700" title={`Liberação mínima às ${displayClock(cycle.expected_ready_at)}`}><Flame className="size-3" />{cycle.oven_code || "Forno"} · posição {cycle.oven_position ?? "—"}</span>;
+}
+
+function StartProductionDialog({
+  orders,
+  heatingLocations,
+  justification,
+  error,
+  saving,
+  onJustificationChange,
+  onClose,
+  onConfirm,
+}: {
+  orders: Order[];
+  heatingLocations: PlanHeatingLocation[];
+  justification: string;
+  error: string;
+  saving: boolean;
+  onJustificationChange: (value: string) => void;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const [confirmedRemoved, setConfirmedRemoved] = useState(false);
+  const [openedAt] = useState(() => Date.now());
+  const cycles = orders.flatMap((order) =>
+    heatingLocations.filter((cycle) =>
+      cycle.tool_heating_cycle_orders?.some((link) => link.production_order_id === order.id),
+    ),
+  );
+  const uniqueCycles = [...new Map(cycles.map((cycle) => [cycle.id, cycle])).values()];
+  const heatingCycles = uniqueCycles.filter((cycle) => cycle.status === "heating");
+  const earlyCycles = heatingCycles.filter((cycle) => new Date(cycle.expected_ready_at).getTime() > openedAt);
+  const requiresJustification = earlyCycles.length > 0;
+  const reference = orders[0];
+  const earliestReady = earlyCycles.map((cycle) => cycle.expected_ready_at).sort()[0];
+  const canConfirm = confirmedRemoved && (!requiresJustification || justification.trim().length >= 8);
+
+  return (
+    <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-950/65 p-3 backdrop-blur-sm">
+      <div className="w-full max-w-xl overflow-hidden rounded-3xl border bg-white shadow-2xl">
+        <div className="flex items-start justify-between border-b px-6 py-5">
+          <div className="flex gap-3">
+            <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-orange-100 text-orange-600">
+              <Play className="size-5" />
+            </span>
+            <div>
+              <h2 className="font-heading text-xl font-black text-slate-950">Confirmar início da produção</h2>
+              <p className="mt-1 text-sm text-slate-500">Confirme a retirada física antes de liberar a prensa.</p>
+            </div>
+          </div>
+          <button aria-label="Cancelar início da produção" onClick={onClose} disabled={saving} className="grid size-8 place-items-center rounded-lg hover:bg-slate-100 disabled:opacity-50"><X className="size-5" /></button>
+        </div>
+        <div className="space-y-4 px-6 py-5">
+          <div className="grid grid-cols-3 gap-2 rounded-2xl bg-slate-50 p-3 text-center">
+            <div><p className="text-[9px] font-bold uppercase text-slate-400">Ferramenta</p><p className="mt-1 font-black text-orange-600">{reference.tool_code}</p></div>
+            <div><p className="text-[9px] font-bold uppercase text-slate-400">Prensa</p><p className="mt-1 font-black">P{reference.machine_code}</p></div>
+            <div><p className="text-[9px] font-bold uppercase text-slate-400">Programação</p><p className="mt-1 font-black">{orders.length} item(ns)</p></div>
+          </div>
+          {requiresJustification ? (
+            <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
+              <p className="font-bold">A ferramenta ainda não completou as 4 horas mínimas de forno.</p>
+              <p className="mt-1 text-xs">A liberação mínima está prevista para {displayClock(earliestReady)}. Informe o motivo da antecipação; ele ficará registrado na auditoria.</p>
+            </div>
+          ) : heatingCycles.length ? (
+            <div className="rounded-2xl border border-orange-200 bg-orange-50 p-4 text-sm text-orange-950">A ferramenta está registrada no forno. Ao confirmar a retirada, ela será liberada e a produção será iniciada.</div>
+          ) : uniqueCycles.some((cycle) => cycle.status === "released") ? (
+            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950">A ferramenta já está liberada no sistema. Confirme apenas que ela foi retirada fisicamente do forno.</div>
+          ) : (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">O sistema não localizou um ciclo de forno ativo para esta ordem. A confirmação será validada pelo servidor antes de iniciar.</div>
+          )}
+          <label className="flex cursor-pointer items-start gap-3 rounded-2xl border p-4 text-sm font-semibold text-slate-900 transition hover:border-orange-300">
+            <input type="checkbox" checked={confirmedRemoved} onChange={(event) => setConfirmedRemoved(event.target.checked)} className="mt-0.5 size-4 accent-orange-500" />
+            <span>Confirmo que a ferramenta foi retirada do forno e está pronta para ser montada na prensa.</span>
+          </label>
+          {requiresJustification && <label className="block"><span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-500">Justificativa da liberação antecipada <span className="text-red-600">*</span></span><textarea autoFocus value={justification} onChange={(event) => onJustificationChange(event.target.value)} placeholder="Ex.: demanda urgente aprovada e condição térmica conferida pelo responsável" className="min-h-24 w-full resize-none rounded-2xl border bg-white p-3 text-sm outline-none transition focus:border-orange-400 focus:ring-4 focus:ring-orange-100" /><span className="mt-1 block text-xs text-slate-500">Mínimo de 8 caracteres.</span></label>}
+          {error && <p className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>}
+        </div>
+        <div className="flex items-center justify-between gap-3 border-t bg-slate-50 px-6 py-4">
+          <Button variant="outline" onClick={onClose} disabled={saving}>Cancelar</Button>
+          <Button onClick={onConfirm} disabled={!canConfirm || saving} className="bg-orange-500 font-bold hover:bg-orange-600">{saving ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}{requiresJustification ? "Justificar e iniciar" : "Confirmar e iniciar"}</Button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function PreheatedToolDialog({
@@ -2767,15 +3807,15 @@ function ProductionCompletionDialog({
   defaultProductivity: number;
   saving: boolean;
   onClose: () => void;
-  onConfirm: (kg: number, pieces: number, notes: string, productivity: number) => void;
+  onConfirm: (kg: number, pieces: number, notes: string, productivity: number, outcome: "complete" | "partial_tool" | "partial_later", partialReason: string) => void;
 }) {
   const order = orders[0];
   const totalTargetKg = orders.reduce(
-    (sum, item) => sum + numeric(item.target_kg),
+    (sum, item) => sum + Math.max(0, numeric(item.target_kg) - numeric(item.produced_kg)),
     0,
   );
   const totalTargetPieces = orders.reduce(
-    (sum, item) => sum + numeric(item.target_quantity),
+    (sum, item) => sum + Math.max(0, numeric(item.target_quantity) - numeric(item.produced_quantity)),
     0,
   );
   const [kg, setKg] = useState(
@@ -2788,7 +3828,12 @@ function ProductionCompletionDialog({
   const [productivity, setProductivity] = useState(
     Number(defaultProductivity.toFixed(3)),
   );
-  const valid = (kg > 0 || pieces > 0) && productivity > 0 && productivity <= 2500;
+  const [outcome, setOutcome] = useState<"complete" | "partial_tool" | "partial_later">("complete");
+  const [partialReason, setPartialReason] = useState("");
+  const partial = outcome !== "complete";
+  const isFullKg = totalTargetKg <= 0 || kg + 0.001 >= totalTargetKg;
+  const isFullPieces = totalTargetPieces <= 0 || pieces >= totalTargetPieces;
+  const valid = (kg > 0 || pieces > 0) && productivity > 0 && productivity <= 2500 && (partial ? partialReason.trim().length >= 8 : isFullKg && isFullPieces);
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 p-3 backdrop-blur-sm">
       <div className="w-full max-w-xl overflow-hidden rounded-2xl border bg-white shadow-2xl">
@@ -2799,9 +3844,7 @@ function ProductionCompletionDialog({
             </span>
             <div>
               <h2 className="font-heading text-lg font-bold">
-                {orders.length > 1
-                  ? "Informar produzido e encerrar campanha"
-                  : "Informar produzido e encerrar"}
+                {orders.length > 1 ? "Apontar resultado da campanha" : "Apontar resultado da produção"}
               </h2>
               <p className="text-xs text-slate-500">
                 {orders.length > 1
@@ -2820,6 +3863,11 @@ function ProductionCompletionDialog({
             <MiniSummary label="Prensa" value={`P${order.machine_code}`} />
             <MiniSummary label="Prazo" value={displayDueDate(order.due_date)} />
           </div>
+          <fieldset className="grid gap-2 sm:grid-cols-3"><legend className="mb-1 text-[10px] font-bold uppercase text-slate-500">Destino do saldo da ordem</legend>{([
+            ["complete", "Concluir", "Todo o saldo foi produzido."],
+            ["partial_tool", "Parcial: ferramenta", "Pausar para corrigir, limpar, trocar ou liberar a ferramenta."],
+            ["partial_later", "Parcial: produzir depois", "Devolver o saldo à programação para outro momento."],
+          ] as const).map(([value, label, description]) => <label key={value} className={`cursor-pointer rounded-xl border p-3 text-xs ${outcome === value ? "border-orange-400 bg-orange-50" : "hover:bg-slate-50"}`}><input className="sr-only" type="radio" name="production-outcome" value={value} checked={outcome === value} onChange={() => setOutcome(value)} /><strong className="block text-slate-900">{label}</strong><span className="mt-1 block text-slate-500">{description}</span></label>)}</fieldset>
           <div className="grid gap-3 sm:grid-cols-3">
             <label>
               <span className="mb-1 block text-[10px] font-bold uppercase text-slate-500">
@@ -2869,6 +3917,7 @@ function ProductionCompletionDialog({
               />
             </label>
           </div>
+          {partial && <label className="block"><span className="mb-1 block text-[10px] font-bold uppercase text-slate-500">Motivo da produção parcial *</span><textarea aria-label="Motivo da produção parcial" value={partialReason} onChange={(event) => setPartialReason(event.target.value)} rows={2} placeholder={outcome === "partial_tool" ? "Ex.: ferramenta trincou e será enviada para correção" : "Ex.: saldo será produzido no próximo turno para atender outra prioridade"} className="w-full resize-none rounded-lg border px-3 py-2 text-sm outline-none focus:border-orange-400 focus:ring-2 focus:ring-orange-100" /><span className="mt-1 block text-[11px] text-slate-500">Mínimo de 8 caracteres. O motivo será gravado no histórico e na auditoria.</span></label>}
           <label className="block">
             <span className="mb-1 block text-[10px] font-bold uppercase text-slate-500">
               Observação do encerramento
@@ -2883,9 +3932,13 @@ function ProductionCompletionDialog({
             />
           </label>
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-            {orders.length > 1
-              ? "O total informado será distribuído proporcionalmente à demanda de cada item. Cada Ordem manterá seu próprio apontamento e cada Plano será encerrado somente quando não houver mais itens ativos."
-              : "Ao confirmar, o item sai da fila. Quando o último item for encerrado, o Plano será concluído automaticamente."}
+            {partial
+              ? outcome === "partial_tool"
+                ? "O resultado desta etapa será registrado e a ordem ficará pausada. Use Retomar produção quando a ferramenta estiver liberada."
+                : "O resultado desta etapa será registrado e somente o saldo voltará à programação. Recalcule a Carga Máquina antes de definir a nova sequência."
+              : orders.length > 1
+                ? "O total informado será distribuído proporcionalmente ao saldo de cada item. Cada Ordem manterá seu próprio apontamento e cada Plano será encerrado somente quando não houver mais itens ativos."
+                : "Ao confirmar, o item sai da fila. Quando o último item for encerrado, o Plano será concluído automaticamente."}
           </div>
         </div>
         <div className="flex justify-end gap-2 border-t bg-slate-50 px-5 py-3">
@@ -2894,13 +3947,11 @@ function ProductionCompletionDialog({
           </Button>
           <Button
             disabled={!valid || saving}
-            onClick={() => onConfirm(kg, pieces, notes, productivity)}
+            onClick={() => onConfirm(kg, pieces, notes, productivity, outcome, partialReason)}
             className="bg-emerald-600 font-bold hover:bg-emerald-700"
           >
             {saving ? <Loader2 className="animate-spin" /> : <Check />}
-            {orders.length > 1
-              ? `Encerrar ${orders.length} itens`
-              : "Encerrar item produzido"}
+            {partial ? "Registrar parcial" : orders.length > 1 ? `Encerrar ${orders.length} itens` : "Encerrar item produzido"}
           </Button>
         </div>
       </div>
@@ -3704,6 +4755,30 @@ function OrderPicker({
       </div>
     </div>
   );
+}
+
+function InProgressPicker({
+  orders,
+  loading,
+  allowedMachines,
+  onOpen,
+  onClose,
+}: {
+  orders: Order[];
+  loading: boolean;
+  allowedMachines: Set<string> | null;
+  onOpen: (order: Order) => void;
+  onClose: () => void;
+}) {
+  const grouped = orders.reduce<Record<string, Order[]>>((result, order) => {
+    (result[order.machine_code] ??= []).push(order);
+    return result;
+  }, {});
+  const machineCodes = Object.keys(grouped).sort();
+  return <div className="absolute right-0 top-11 z-30 w-[440px] max-w-[calc(100vw-2rem)] rounded-xl border bg-white p-2 shadow-2xl">
+    <div className="flex items-center justify-between px-2 py-1"><div><p className="text-xs font-bold">Produções em andamento</p><p className="text-[10px] text-slate-500">{allowedMachines ? "Mostrando somente as suas prensas." : "Mostrando todas as prensas permitidas."}</p></div><button aria-label="Fechar produções em andamento" onClick={onClose}><X className="size-4" /></button></div>
+    <div className="mt-1 max-h-72 space-y-2 overflow-auto">{loading ? <p className="p-4 text-center text-xs text-slate-500">Carregando produções...</p> : machineCodes.length ? machineCodes.map((machineCode) => <section key={machineCode} className="overflow-hidden rounded-lg border"><p className="bg-slate-50 px-3 py-1.5 text-[10px] font-black uppercase text-slate-600">Prensa {machineCode === "18" ? "1.8" : machineCode === "19" ? "1.9" : machineCode}</p>{grouped[machineCode].map((order) => <button key={order.id} onClick={() => onOpen(order)} className="flex w-full items-center gap-3 border-t px-3 py-2 text-left hover:bg-emerald-50"><span className="grid size-7 shrink-0 place-items-center rounded-full bg-emerald-100 text-emerald-700"><Play className="size-3" /></span><span className="min-w-0 flex-1"><b className="block truncate text-xs">{order.tool_code} · {order.order_number}</b><span className="block truncate text-[10px] text-slate-500">{order.customer_name || "Sem cliente"} · início {order.actual_start ? displayClock(order.actual_start) : "não informado"}</span></span><span className="text-[10px] font-bold text-emerald-700">Abrir</span></button>)}</section>) : <p className="rounded-lg bg-slate-50 p-4 text-center text-xs text-slate-500">Nenhuma produção em andamento nas prensas liberadas para você.</p>}</div>
+  </div>;
 }
 
 function HistoryPicker({

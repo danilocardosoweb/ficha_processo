@@ -43,6 +43,7 @@ const pendingStatuses = new Set([
 type QueueAction =
   | { kind: "complete_item" | "stop_item"; queue: SimplifiedQueue; order: ProductionOrder }
   | { kind: "finish_plan" | "delete_plan"; queue: SimplifiedQueue };
+type SequenceView = "work" | "original";
 
 export function OrdersTable({ queues }: { queues: SimplifiedQueue[] }) {
   const { display_name: actor } = useCurrentUser();
@@ -50,6 +51,7 @@ export function OrdersTable({ queues }: { queues: SimplifiedQueue[] }) {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
   const [queueView, setQueueView] = useState("active");
+  const [sequenceView, setSequenceView] = useState<SequenceView>("work");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [action, setAction] = useState<QueueAction | null>(null);
   const [reason, setReason] = useState("");
@@ -78,16 +80,21 @@ export function OrdersTable({ queues }: { queues: SimplifiedQueue[] }) {
               (status === "all" || order.status === status) &&
               (!normalizedSearch ||
                 metadataMatch ||
-                matchesOrder(order, normalizedSearch)),
+                matchesOrder(order, normalizedSearch, sequenceView)),
           );
-          return { queue, orders: matchingOrders, metadataMatch };
+          const ordered = [...matchingOrders].sort((left, right) => {
+            const leftMachine = sequenceMachine(left, sequenceView) ?? "";
+            const rightMachine = sequenceMachine(right, sequenceView) ?? "";
+            return leftMachine.localeCompare(rightMachine) || sequenceNumber(left, sequenceView) - sequenceNumber(right, sequenceView);
+          });
+          return { queue, orders: ordered, metadataMatch };
         })
         .filter(
           ({ orders, metadataMatch }) =>
             orders.length > 0 ||
             (status === "all" && (!normalizedSearch || metadataMatch)),
         ),
-    [normalizedSearch, queueView, queues, status],
+    [normalizedSearch, queueView, queues, sequenceView, status],
   );
 
   const totalPending = queues.reduce(
@@ -203,6 +210,10 @@ export function OrdersTable({ queues }: { queues: SimplifiedQueue[] }) {
           <SelectTrigger className="w-full bg-white lg:w-44"><Layers3 className="size-3.5" /><SelectValue placeholder="Fila ativa" /></SelectTrigger>
           <SelectContent><SelectItem value="active">Fila ativa</SelectItem><SelectItem value="history">Histórico</SelectItem><SelectItem value="all">Todos os Planos</SelectItem></SelectContent>
         </Select>
+        <Select value={sequenceView} onValueChange={(value) => setSequenceView((value as SequenceView) ?? "work")}>
+          <SelectTrigger className="w-full bg-white lg:w-56"><Factory className="size-3.5" /><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="work">Sequência de trabalho</SelectItem><SelectItem value="original">Sequência original</SelectItem></SelectContent>
+        </Select>
         <Select
           value={status}
           onValueChange={(value) => setStatus(value ?? "all")}
@@ -239,6 +250,8 @@ export function OrdersTable({ queues }: { queues: SimplifiedQueue[] }) {
             Boolean(normalizedSearch) ||
             status !== "all";
           const isNext = queue.id === nextFifoId;
+          const machineCodes = [...new Set(allOrders.map((order) => sequenceMachine(order, sequenceView)).filter(Boolean))];
+          const hasApprovedWorkSequence = queue.active_sequence_source === "simulation" || allOrders.some((order) => order.active_sequence_source === "simulation");
           return (
             <section
               key={queue.id}
@@ -278,10 +291,10 @@ export function OrdersTable({ queues }: { queues: SimplifiedQueue[] }) {
                 </span>
                 <span>
                   <span className="text-[10px] font-bold uppercase text-slate-400">
-                    Prensa
+                    Prensa(s) · {sequenceView === "original" ? "original" : "trabalho"}
                   </span>
                   <strong className="mt-1 block text-sm">
-                    {displayMachine(queue.machine_code)}
+                    {machineCodes.length ? machineCodes.map((code) => displayMachine(code)).join(" · ") : displayMachine(queue.machine_code)}
                   </strong>
                 </span>
                 <span className="min-w-0">
@@ -301,6 +314,9 @@ export function OrdersTable({ queues }: { queues: SimplifiedQueue[] }) {
                           ? "PROGRAMAÇÃO ATIVA"
                           : "HISTÓRICO"}
                   </span>
+                  <span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[9px] font-bold ${sequenceView === "work" && hasApprovedWorkSequence ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-500"}`}>
+                    {sequenceView === "original" ? "SEQUÊNCIA ORIGINAL PRESERVADA" : hasApprovedWorkSequence ? `SEQUÊNCIA DE TRABALHO · CENÁRIO APROVADO${queue.active_sequence_version ? ` v${queue.active_sequence_version}` : ""}` : "SEQUÊNCIA ORIGINAL · SEM CENÁRIO APROVADO"}
+                  </span>
                 </span>
                 <span className="grid size-9 place-items-center rounded-xl border bg-white text-slate-600 shadow-sm">
                   {isExpanded ? (
@@ -313,7 +329,7 @@ export function OrdersTable({ queues }: { queues: SimplifiedQueue[] }) {
 
               {isExpanded && (
                 <div className="border-t bg-white">
-                  <OrderRows queue={queue} orders={orders} onAction={openAction} />
+                  <OrderRows queue={queue} orders={orders} sequenceView={sequenceView} onAction={openAction} />
                 </div>
               )}
             </section>
@@ -330,7 +346,7 @@ export function OrdersTable({ queues }: { queues: SimplifiedQueue[] }) {
   );
 }
 
-function OrderRows({ queue, orders, onAction }: { queue: SimplifiedQueue; orders: ProductionOrder[]; onAction: (action: QueueAction) => void }) {
+function OrderRows({ queue, orders, sequenceView, onAction }: { queue: SimplifiedQueue; orders: ProductionOrder[]; sequenceView: SequenceView; onAction: (action: QueueAction) => void }) {
   const pending = queue.production_orders.filter((order) => pendingStatuses.has(order.status)).length;
   return (
     <div className="overflow-x-auto">
@@ -339,6 +355,7 @@ function OrderRows({ queue, orders, onAction }: { queue: SimplifiedQueue; orders
         <thead className="bg-slate-50 text-[9px] uppercase tracking-wider text-slate-400">
           <tr>
             <th className="px-5 py-2.5">Seq.</th>
+            <th className="px-5 py-2.5">Prensa</th>
             <th className="px-5 py-2.5">Ordem / item</th>
             <th className="px-5 py-2.5">Ferramenta / perfil</th>
             <th className="px-5 py-2.5">Cliente</th>
@@ -354,8 +371,9 @@ function OrderRows({ queue, orders, onAction }: { queue: SimplifiedQueue; orders
           {orders.map((order) => (
             <tr key={order.id} className="border-t hover:bg-slate-50/70">
               <td className="px-5 py-3 font-mono font-bold text-slate-400">
-                {String(order.sequence).padStart(2, "0")}
+                {String(sequenceNumber(order, sequenceView)).padStart(2, "0")}
               </td>
+              <td className="px-5 py-3 font-semibold">{displayMachine(sequenceMachine(order, sequenceView))}</td>
               <td className="px-5 py-3 font-mono font-semibold">
                 {order.order_number}
               </td>
@@ -431,17 +449,30 @@ function QueueSummary({
   );
 }
 
-function matchesOrder(order: ProductionOrder, search: string) {
+function matchesOrder(order: ProductionOrder, search: string, view: SequenceView) {
   return [
     order.order_number,
     order.plan_code,
     order.tool_code,
     order.product_code,
     order.customer_name,
+    sequenceMachine(order, view),
   ]
     .join(" ")
     .toLowerCase()
     .includes(search);
+}
+
+function sequenceMachine(order: ProductionOrder, view: SequenceView) {
+  return view === "original"
+    ? order.original_machine_code ?? order.machine_code
+    : order.machine_code;
+}
+
+function sequenceNumber(order: ProductionOrder, view: SequenceView) {
+  return view === "original"
+    ? order.original_sequence ?? order.sequence
+    : order.sequence;
 }
 
 function displayMachine(code: string | null) {

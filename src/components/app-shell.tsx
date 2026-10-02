@@ -28,7 +28,8 @@ export function AppShell({ children, user }: { children: ReactNode; user: LocalU
       }
     };
     heartbeat();
-    const interval = window.setInterval(heartbeat, 45_000);
+    // Sessão não precisa de polling agressivo durante o desenvolvimento.
+    const interval = window.setInterval(heartbeat, 5 * 60_000);
     document.addEventListener("visibilitychange", heartbeat);
     return () => {
       window.clearInterval(interval);
@@ -64,7 +65,7 @@ export function AppShell({ children, user }: { children: ReactNode; user: LocalU
         )}
       >
         <AppHeader user={user} />
-        <main className="mx-auto max-w-[1800px] p-4 md:p-8">{children}</main>
+        <main className="app-main-shell mx-auto max-w-[1800px] p-4 lg:p-5 min-[1440px]:p-8">{children}</main>
       </div>
     </div></OperationalMessagesProvider></CurrentUserProvider>
   );

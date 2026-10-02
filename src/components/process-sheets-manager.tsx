@@ -152,6 +152,7 @@ export function ProcessSheetsManager({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [importing, setImporting] = useState(false);
   const [searchInput, setSearchInput] = useState(normalizedInitialTool);
   const [search, setSearch] = useState(normalizedInitialTool);
   const [cutFilter, setCutFilter] = useState("");
@@ -698,6 +699,18 @@ export function ProcessSheetsManager({
   const hasFilters = Boolean(searchInput || cutFilter || machineFilter);
   const firstResult = total === 0 ? 0 : page * pageSize + 1;
   const lastResult = Math.min((page + 1) * pageSize, total);
+  async function importWorkbook(file: File) {
+    setImporting(true); setMessage("");
+    try {
+      const form = new FormData(); form.append("file", file);
+      const response = await fetch("/api/process-sheets/import", { method: "POST", body: form });
+      const result = await response.json();
+      if (!response.ok) { const details = Array.isArray(result.errors) && result.errors.length ? ` ${result.errors.join(" | ")}` : ""; throw new Error((result.error || "Não foi possível importar a planilha.") + details); }
+      setMessage(`${result.imported} fichas importadas para as prensas ${result.presses.join(" e ")}.${result.duplicatesMerged ? ` ${result.duplicatesMerged} linhas repetidas foram consolidadas.` : ""}`);
+      setPage(0); await load();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Não foi possível importar a planilha."); }
+    finally { setImporting(false); }
+  }
 
   return (
     <>
@@ -721,6 +734,11 @@ export function ProcessSheetsManager({
               <FilePlus2 className="size-4" />
               Nova ficha
             </Button>
+            <label className="inline-flex h-10 cursor-pointer items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+              <FilePlus2 className="size-4" />
+              {importing ? "Lendo planilha…" : "Importar planilha"}
+              <input type="file" accept=".xlsx,.xls" className="hidden" disabled={importing} onChange={(event) => { const file = event.target.files?.[0]; if (file) void importWorkbook(file); event.target.value = ""; }} />
+            </label>
           </div>
           <div className="mt-4 flex flex-col gap-2 lg:flex-row">
             <div className="relative flex-1">
@@ -1039,7 +1057,7 @@ export function ProcessSheetsManager({
               </Button>
             </SheetHeader>
             <div className="min-h-0 flex-1 overflow-y-auto bg-slate-50/40 px-5 py-5">
-              <div className="grid gap-4 rounded-xl border bg-white p-4 md:grid-cols-3 xl:grid-cols-5">
+              <div className="grid gap-4 rounded-xl border bg-white p-4 md:grid-cols-3 min-[1600px]:grid-cols-5">
                 <Field
                   label="Ferramenta"
                   name="product_code"
@@ -1396,7 +1414,7 @@ function SheetTable({
     );
   }
   return (
-    <table className="w-full min-w-[900px] border-collapse text-left text-sm">
+    <table className="w-full min-w-[760px] border-collapse text-left text-sm min-[1440px]:min-w-[900px]">
       <thead className="sticky top-0 z-10 bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500 shadow-[0_1px_0_0_#e2e8f0]">
         <tr>
           <Th>Ferramenta</Th>

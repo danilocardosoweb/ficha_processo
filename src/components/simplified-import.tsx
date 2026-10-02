@@ -727,7 +727,7 @@ export function SimplifiedImport() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-4 gap-3 border-b bg-slate-50/70 px-4 py-3">
+          <div className="grid grid-cols-2 gap-3 border-b bg-slate-50/70 px-4 py-3 sm:grid-cols-4">
             <Summary label="Itens encontrados" value={rows.length} />
             <Summary label="Programações ativas" value={activeCount} accent />
             <Summary
@@ -741,7 +741,7 @@ export function SimplifiedImport() {
             />
           </div>
           <div className="max-h-[calc(100dvh-390px)] min-h-52 overflow-auto">
-            <table className="w-full min-w-[900px] text-left text-[11px]">
+            <table className="w-full min-w-[760px] text-left text-[11px] min-[1440px]:min-w-[900px]">
               <thead className="sticky top-0 z-10 bg-slate-50 text-[9px] uppercase tracking-wider text-slate-500">
                 <tr>
                   {[

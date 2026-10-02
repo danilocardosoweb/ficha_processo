@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { LOCAL_SESSION_COOKIE } from "@/lib/local-auth/types";
+import { developmentLoginMatches, developmentSessionToken, getDevelopmentUser, isDevelopmentAuthEnabled } from "@/lib/local-auth/development";
 
 const schema = z.object({ login: z.string().trim().min(3).max(120), password: z.string().min(1).max(200) });
 
@@ -19,12 +20,27 @@ export async function POST(request: Request) {
     });
     if (error) {
       console.error("Falha no local_login:", error);
+      if (isDevelopmentAuthEnabled() && developmentLoginMatches(parsed.data.login, parsed.data.password)) {
+        const response = NextResponse.json({ ok: true, development: true, mustChangePassword: false });
+        response.cookies.set(LOCAL_SESSION_COOKIE, developmentSessionToken(), {
+          httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/", maxAge: 60 * 60 * 12, priority: "high",
+        });
+        console.warn(`Acesso local de desenvolvimento concedido para ${getDevelopmentUser().username}; o Supabase continua indisponível.`);
+        return response;
+      }
       return NextResponse.json({ error: "Não foi possível validar o acesso. Verifique se as tabelas e funções de usuários foram aplicadas no Supabase." }, { status: 503 });
     }
     const result = Array.isArray(data) ? data[0] : data;
     if (!result?.session_token) {
-    const message = result?.error_code === "INACTIVE" ? "Usuário desativado. Procure um administrador." : result?.error_code === "LOCKED" ? "Acesso bloqueado por 15 minutos após tentativas inválidas." : "Usuário ou senha inválidos.";
-    return NextResponse.json({ error: message }, { status: 401 });
+      if (isDevelopmentAuthEnabled() && developmentLoginMatches(parsed.data.login, parsed.data.password)) {
+        const response = NextResponse.json({ ok: true, development: true, mustChangePassword: false });
+        response.cookies.set(LOCAL_SESSION_COOKIE, developmentSessionToken(), {
+          httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/", maxAge: 60 * 60 * 12, priority: "high",
+        });
+        return response;
+      }
+      const message = result?.error_code === "INACTIVE" ? "Usuário desativado. Procure um administrador." : result?.error_code === "LOCKED" ? "Acesso bloqueado por 15 minutos após tentativas inválidas." : "Usuário ou senha inválidos.";
+      return NextResponse.json({ error: message }, { status: 401 });
     }
     const response = NextResponse.json({ ok: true, mustChangePassword: result.must_change_password });
     response.cookies.set(LOCAL_SESSION_COOKIE, result.session_token, {

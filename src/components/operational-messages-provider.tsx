@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, Bell, Check, CheckCheck, CircleAlert, Info, Megaphone, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -37,8 +37,12 @@ export function OperationalMessagesProvider({ children }: { children: ReactNode 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<"all" | MessageSource>("all");
+  const [temporarilyHiddenMessageId, setTemporarilyHiddenMessageId] = useState<string | null>(null);
+  const refreshingRef = useRef<Promise<void> | null>(null);
 
   const refresh = useCallback(async () => {
+    if (refreshingRef.current) return refreshingRef.current;
+    const request = (async () => {
     try {
       const response = await fetch("/api/messages", { cache: "no-store" });
       if (!response.ok) throw new Error("Falha ao carregar");
@@ -50,12 +54,17 @@ export function OperationalMessagesProvider({ children }: { children: ReactNode 
     } finally {
       setLoading(false);
     }
+    })();
+    refreshingRef.current = request;
+    try { await request; } finally { refreshingRef.current = null; }
   }, []);
 
   useEffect(() => {
     const initial = window.setTimeout(() => void refresh(), 0);
-    const interval = window.setInterval(() => void refresh(), 30_000);
-    return () => { window.clearTimeout(initial); window.clearInterval(interval); };
+    const refreshIfVisible = () => { if (document.visibilityState === "visible") void refresh(); };
+    const interval = window.setInterval(refreshIfVisible, 2 * 60_000);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => { window.clearTimeout(initial); window.clearInterval(interval); document.removeEventListener("visibilitychange", refreshIfVisible); };
   }, [refresh]);
 
   async function mark(id: string, action: "read" | "acknowledge" | "dismiss") {
@@ -74,10 +83,13 @@ export function OperationalMessagesProvider({ children }: { children: ReactNode 
   return (
     <MessagesContext.Provider value={{ messages, unreadCount, open, setOpen, refresh }}>
       {children}
-      {featured && <div className={cn("fixed bottom-4 left-4 right-4 z-30 flex items-center gap-3 rounded-2xl border p-3 shadow-xl lg:left-auto lg:right-6 lg:max-w-xl", priorityStyle[featured.priority].tone)}>
+      {featured && featured.id !== temporarilyHiddenMessageId && <div className={cn("fixed bottom-3 left-3 right-3 z-30 flex flex-col gap-2 rounded-2xl border p-3 shadow-xl sm:flex-row sm:items-center sm:gap-3 lg:left-auto lg:right-6 lg:max-w-xl", priorityStyle[featured.priority].tone)}>
         <AlertTriangle className="size-5 shrink-0" />
-        <button className="min-w-0 flex-1 text-left" onClick={() => setOpen(true)}><span className="block truncate text-sm font-bold">{featured.title}</span><span className="block truncate text-xs opacity-80">{featured.body}</span></button>
-        <Button size="sm" variant="outline" className="shrink-0 bg-white/80" onClick={() => void mark(featured.id, featured.requires_ack ? "acknowledge" : "dismiss")}>{featured.requires_ack ? "Confirmar" : "Dispensar"}</Button>
+        <button className="min-w-0 flex-1 text-left" onClick={() => setOpen(true)}><span className="block text-sm font-bold leading-5">{featured.title}</span><span className="mt-0.5 block text-xs leading-4 opacity-80">{featured.body}</span></button>
+        <div className="flex shrink-0 items-center justify-end gap-1">
+          <Button size="sm" variant="outline" className="bg-white/80" onClick={() => void mark(featured.id, featured.requires_ack ? "acknowledge" : "dismiss")}>{featured.requires_ack ? "Confirmar" : "Dispensar"}</Button>
+          <Button size="icon" variant="ghost" className="size-8" aria-label="Ocultar aviso por enquanto" onClick={() => setTemporarilyHiddenMessageId(featured.id)}><X className="size-4" /></Button>
+        </div>
       </div>}
       {open && <div className="fixed inset-0 z-50 bg-slate-950/35" onMouseDown={() => setOpen(false)}>
         <aside className="ml-auto flex h-full w-full max-w-md flex-col bg-white shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>

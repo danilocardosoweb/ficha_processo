@@ -43,7 +43,7 @@ export default async function DashboardPage() {
     <DashboardLiveRefresh />
     <PageHeading eyebrow="Centro de operações" title={`Bom dia, ${firstName}`} description="Indicadores calculados com os apontamentos reais do sistema." action={canImport ? <Button render={<Link href="/importar" />} className="bg-orange-500 hover:bg-orange-600">Importar programação <ArrowRight className="size-4" /></Button> : undefined} />
     {!snapshot.available && <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"><TriangleAlert className="size-4" />Não foi possível atualizar os indicadores agora. Nenhum valor demonstrativo foi exibido.</div>}
-    <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 min-[1600px]:grid-cols-4">
       {kpis.map((kpi) => <Card key={kpi.label} className="gap-3 border-0 py-4 shadow-sm"><CardContent className="flex items-start justify-between px-5"><div className="min-w-0"><p className="text-xs font-medium text-slate-500">{kpi.label}</p><p className="font-heading mt-1.5 text-2xl font-extrabold tracking-tight">{kpi.value}</p><p className="mt-1 truncate text-[11px] text-slate-400">{kpi.note}</p></div><span className={`grid size-10 shrink-0 place-items-center rounded-xl ${kpi.color}`}><kpi.icon className="size-5" /></span></CardContent></Card>)}
     </section>
     <section className="mt-4 grid gap-4 xl:grid-cols-[1.45fr_1fr]">
