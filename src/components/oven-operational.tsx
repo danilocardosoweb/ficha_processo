@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
+import { subscribeToOvenBoard } from "@/lib/supabase/oven-realtime";
 import { requestOfflineSync } from "@/lib/offline-store";
 import type { LocalUser } from "@/lib/local-auth/types";
 import { cn } from "@/lib/utils";
@@ -136,6 +137,7 @@ export function OvenOperational({ user }: { user: LocalUser }) {
   const [query, setQuery] = useState("");
   const [machineFilterReady, setMachineFilterReady] = useState(false);
   const loadingRef = useRef(false);
+  const realtimeRefreshRef = useRef<number | null>(null);
   const machineFilterKey = `tecnomes:forno-operacional:machine-filter:${user.user_id}`;
 
   const load = useCallback(async (silent = false) => {
@@ -170,6 +172,15 @@ export function OvenOperational({ user }: { user: LocalUser }) {
     }
   }, [machine]);
 
+  const scheduleRealtimeRefresh = useCallback(() => {
+    if (document.visibilityState !== "visible") return;
+    if (realtimeRefreshRef.current !== null) window.clearTimeout(realtimeRefreshRef.current);
+    realtimeRefreshRef.current = window.setTimeout(() => {
+      realtimeRefreshRef.current = null;
+      void load(true);
+    }, 250);
+  }, [load]);
+
   useEffect(() => {
     let active = true;
     try {
@@ -185,11 +196,36 @@ export function OvenOperational({ user }: { user: LocalUser }) {
   useEffect(() => { if (machineFilterReady) try { window.localStorage.setItem(machineFilterKey, machine); } catch {} }, [machine, machineFilterKey, machineFilterReady]);
   useEffect(() => {
     void load();
-    // O contador continua localmente em tempo real; a consulta ao banco não precisa
-    // repetir três payloads grandes a cada 15 segundos.
-    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void load(true); }, 60_000);
-    return () => window.clearInterval(timer);
+    // O contador continua localmente em tempo real. O Realtime atualiza mudanças;
+    // esta sincronização lenta é apenas uma proteção contra queda de conexão.
+    const refreshIfVisible = () => { if (document.visibilityState === "visible") void load(true); };
+    const timer = window.setInterval(refreshIfVisible, 5 * 60_000);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
   }, [load]);
+  useEffect(() => {
+    if (!organizationId) return;
+    const cleanup = subscribeToOvenBoard(createClient(), {
+      organizationId,
+      machineCodes: [machine],
+      onChange: scheduleRealtimeRefresh,
+      onStatus: (status) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          setNotice("Atualização em tempo real indisponível; usando sincronização de segurança.");
+        }
+      },
+    });
+    return () => {
+      if (realtimeRefreshRef.current !== null) {
+        window.clearTimeout(realtimeRefreshRef.current);
+        realtimeRefreshRef.current = null;
+      }
+      cleanup();
+    };
+  }, [machine, scheduleRealtimeRefresh]);
   useEffect(() => {
     const tick = () => setClock(new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date()));
     const connection = () => setOnline(navigator.onLine);
