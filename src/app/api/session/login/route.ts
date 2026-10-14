@@ -3,6 +3,9 @@ import { z } from "zod";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/server";
 import { LOCAL_SESSION_COOKIE } from "@/lib/local-auth/types";
 import { developmentLoginMatches, developmentSessionToken, getDevelopmentUser, isDevelopmentAuthEnabled } from "@/lib/local-auth/development";
+import { authenticateLocalUser, hasLocalUsers } from "@/lib/local-db/auth";
+import { isLocalDesktopMode } from "@/lib/local-db/mode";
+import { localSessionCookieOptions } from "@/lib/local-auth/cookie";
 
 const schema = z.object({ login: z.string().trim().min(3).max(120), password: z.string().min(1).max(200) });
 
@@ -29,6 +32,17 @@ export async function POST(request: Request) {
   const parsed = schema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "Informe usuário e senha." }, { status: 400 });
   try {
+    if (isLocalDesktopMode()) {
+      if (!hasLocalUsers()) return NextResponse.json({ error: "Configure o primeiro acesso antes de entrar.", code: "SETUP_REQUIRED" }, { status: 428 });
+      const result = authenticateLocalUser(parsed.data.login, parsed.data.password, request.headers.get("user-agent"));
+      if ("error" in result) {
+        const error = result.error === "LOCKED" ? "Acesso bloqueado por 15 minutos após tentativas inválidas." : "Usuário ou senha inválidos.";
+        return NextResponse.json({ error }, { status: 401 });
+      }
+      const response = NextResponse.json({ ok: true, localMode: true, mustChangePassword: result.user.must_change_password });
+      response.cookies.set(LOCAL_SESSION_COOKIE, result.token, localSessionCookieOptions(60 * 60 * 12));
+      return response;
+    }
     if (!isSupabaseConfigured()) {
       return NextResponse.json({ error: "O servidor está sem a configuração do Supabase. Confira as variáveis de produção na Vercel." }, { status: 503 });
     }
@@ -44,9 +58,7 @@ export async function POST(request: Request) {
       console.error("Falha no local_login:", { code: error.code, message: error.message });
       if (isDevelopmentAuthEnabled() && developmentLoginMatches(parsed.data.login, parsed.data.password)) {
         const response = NextResponse.json({ ok: true, development: true, mustChangePassword: false });
-        response.cookies.set(LOCAL_SESSION_COOKIE, developmentSessionToken(), {
-          httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/", maxAge: 60 * 60 * 12, priority: "high",
-        });
+        response.cookies.set(LOCAL_SESSION_COOKIE, developmentSessionToken(), localSessionCookieOptions(60 * 60 * 12));
         console.warn(`Acesso local de desenvolvimento concedido para ${getDevelopmentUser().username}; o Supabase continua indisponível.`);
         return response;
       }
@@ -56,18 +68,14 @@ export async function POST(request: Request) {
     if (!result?.session_token) {
       if (isDevelopmentAuthEnabled() && developmentLoginMatches(parsed.data.login, parsed.data.password)) {
         const response = NextResponse.json({ ok: true, development: true, mustChangePassword: false });
-        response.cookies.set(LOCAL_SESSION_COOKIE, developmentSessionToken(), {
-          httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/", maxAge: 60 * 60 * 12, priority: "high",
-        });
+        response.cookies.set(LOCAL_SESSION_COOKIE, developmentSessionToken(), localSessionCookieOptions(60 * 60 * 12));
         return response;
       }
       const message = result?.error_code === "INACTIVE" ? "Usuário desativado. Procure um administrador." : result?.error_code === "LOCKED" ? "Acesso bloqueado por 15 minutos após tentativas inválidas." : "Usuário ou senha inválidos.";
       return NextResponse.json({ error: message }, { status: 401 });
     }
     const response = NextResponse.json({ ok: true, mustChangePassword: result.must_change_password });
-    response.cookies.set(LOCAL_SESSION_COOKIE, result.session_token, {
-      httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/", maxAge: 60 * 60 * 12, priority: "high",
-    });
+    response.cookies.set(LOCAL_SESSION_COOKIE, result.session_token, localSessionCookieOptions(60 * 60 * 12));
     return response;
   } catch (error) {
     console.error("Erro inesperado ao iniciar sessão:", error);

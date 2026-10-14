@@ -19,7 +19,9 @@
 
 # production
 /build
+/dist
 /data/agent-workspace/
+/data/web-migration/
 
 # misc
 .DS_Store

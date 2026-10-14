@@ -2,6 +2,12 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getSessionToken } from "@/lib/local-auth/server";
 import { createClient } from "@/lib/supabase/server";
+import { getLocalResourceActor, localResourceError, requireLocalResourceRole } from "@/lib/local-db/catalog-route-auth";
+import { isLocalDesktopMode } from "@/lib/local-db/mode";
+import { listLocalBilletStock, releaseLocalBilletReservation, reserveLocalBilletStock, saveLocalBilletLot } from "@/lib/local-db/resources";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const upsertSchema = z.object({
   operation: z.literal("upsertLot"),
@@ -39,6 +45,11 @@ async function context() {
 }
 
 export async function GET() {
+  if (isLocalDesktopMode()) {
+    const actor = await getLocalResourceActor();
+    if (actor.response) return actor.response;
+    return NextResponse.json(listLocalBilletStock(), { headers: { "Cache-Control": "no-store" } });
+  }
   const ctx = await context();
   if (!ctx) return NextResponse.json({ error: "Sessão encerrada." }, { status: 401 });
   const { data, error } = await ctx.supabase.rpc("local_list_billet_stock", { p_token: ctx.token });
@@ -47,6 +58,25 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  if (isLocalDesktopMode()) {
+    const actor = await getLocalResourceActor();
+    if (actor.response) return actor.response;
+    const parsed = schema.safeParse(await request.json().catch(() => null));
+    if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message || "Revise os dados." }, { status: 400 });
+    const denied = requireLocalResourceRole(actor.user, ["admin", "pcp"], "alterar ou reservar estoque de tarugos");
+    if (denied) return denied;
+    try {
+      const value = parsed.data;
+      const data = value.operation === "upsertLot"
+        ? { id: saveLocalBilletLot({ ...value, alloyCode: value.alloyCode.toUpperCase(), lotCode: value.lotCode.toUpperCase() }, actor.user.user_id) }
+        : value.operation === "reserve"
+          ? reserveLocalBilletStock(value, actor.user.user_id)
+          : releaseLocalBilletReservation(value.reservationId, actor.user.user_id);
+      return NextResponse.json({ ok: true, data });
+    } catch (error) {
+      return localResourceError(error);
+    }
+  }
   const ctx = await context();
   if (!ctx) return NextResponse.json({ error: "Sessão encerrada." }, { status: 401 });
   const parsed = schema.safeParse(await request.json().catch(() => null));

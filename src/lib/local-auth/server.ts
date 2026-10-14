@@ -6,6 +6,8 @@ import { createClient } from "@/lib/supabase/server";
 import { LOCAL_SESSION_COOKIE, type LocalUser, type ManagedUser } from "@/lib/local-auth/types";
 import { canAccess, type AccessArea } from "@/lib/access-control";
 import { getDevelopmentUser, isDevelopmentSession } from "@/lib/local-auth/development";
+import { getLocalSession, listManagedLocalUsers } from "@/lib/local-db/auth";
+import { isLocalDesktopMode } from "@/lib/local-db/mode";
 
 export async function getSessionToken() {
   return (await cookies()).get(LOCAL_SESSION_COOKIE)?.value ?? null;
@@ -14,6 +16,7 @@ export async function getSessionToken() {
 export async function getCurrentUser(): Promise<LocalUser | null> {
   const token = await getSessionToken();
   if (!token) return null;
+  if (isLocalDesktopMode()) return getLocalSession(token);
   if (isDevelopmentSession(token)) return getDevelopmentUser();
   try {
     const supabase = await createClient();
@@ -46,6 +49,7 @@ export async function requirePermission(area: AccessArea) {
 export async function listLocalUsers(): Promise<ManagedUser[]> {
   const token = await getSessionToken();
   if (!token) return [];
+  if (isLocalDesktopMode()) return getLocalSession(token) ? listManagedLocalUsers() : [];
   const supabase = await createClient();
   const present = await supabase.rpc("local_list_users_with_presence", { p_token: token });
   if (!present.error) return (present.data ?? []) as ManagedUser[];

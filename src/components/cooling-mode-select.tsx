@@ -27,6 +27,7 @@ type CoolingMode = {
 };
 
 const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
+const isLocalEdition = process.env.NEXT_PUBLIC_APP_ENVIRONMENT === "desktop";
 
 function toCatalogCode(value: string) {
   return value
@@ -61,6 +62,10 @@ export function CoolingModeSelect({
   const [problem, setProblem] = useState("");
 
   const loadOptions = useCallback(async () => {
+    if (isLocalEdition) {
+      setOptions([]);
+      return;
+    }
     try {
       if (!organizationId) throw new Error("Organização não configurada.");
       const supabase = createClient();
@@ -173,6 +178,22 @@ export function CoolingModeSelect({
     (option) =>
       option.label === selectedValue || option.code === selectedValue,
   );
+
+  if (isLocalEdition) {
+    return (
+      <div className={cn("space-y-2", className)}>
+        <Label htmlFor={name}>{label}</Label>
+        <Input
+          id={name}
+          name={name}
+          value={selectedValue}
+          onChange={(event) => select(event.target.value)}
+          required={required}
+          placeholder="Informe o modo de resfriamento"
+        />
+      </div>
+    );
+  }
 
   return (
     <div className={cn("space-y-2", className)}>

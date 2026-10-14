@@ -3,6 +3,12 @@ import { z } from "zod";
 import { getSessionToken } from "@/lib/local-auth/server";
 import { isDevelopmentSession } from "@/lib/local-auth/development";
 import { createClient } from "@/lib/supabase/server";
+import { getLocalResourceActor, localResourceError, requireLocalResourceRole } from "@/lib/local-db/catalog-route-auth";
+import { isLocalDesktopMode } from "@/lib/local-db/mode";
+import { listLocalBoResources, saveLocalBoResource } from "@/lib/local-db/resources";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const schema = z.object({
   id: z.string().uuid().nullable(), boCode: z.string().trim().min(1).max(50),
@@ -14,6 +20,11 @@ const schema = z.object({
 async function context() { const token = await getSessionToken(); return token ? { token, supabase: await createClient() } : null; }
 
 export async function GET() {
+  if (isLocalDesktopMode()) {
+    const actor = await getLocalResourceActor();
+    if (actor.response) return actor.response;
+    return NextResponse.json(listLocalBoResources(), { headers: { "Cache-Control": "no-store" } });
+  }
   const ctx = await context(); if (!ctx) return NextResponse.json({ error: "Sessão encerrada." }, { status: 401 });
   if (isDevelopmentSession(ctx.token)) {
     const seed: Array<[string, number]> = [["0", 0], ["1", 0], ["1A", 0], ["2", 0], ["2A", 0], ["3", 0], ["4", 0], ["5", 0], ["6", 0], ["6A", 0], ["7", 0], ["8", 0], ["9", 0], ["10", 0], ["11", 0], ["12", 0], ["13", 0], ["15", 0], ["16", 0], ["17", 0], ["18", 0], ["19", 0], ["20", 0], ["21", 0], ["100", 0], ["135", 0], ["336", 0], ["350", 0], ["421", 0], ["529", 0], ["811", 0], ["908", 0]];
@@ -25,6 +36,21 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  if (isLocalDesktopMode()) {
+    const actor = await getLocalResourceActor();
+    if (actor.response) return actor.response;
+    const denied = requireLocalResourceRole(actor.user, ["admin", "manager", "pcp"], "alterar o estoque de BOs");
+    if (denied) return denied;
+    const parsed = schema.safeParse(await request.json().catch(() => null));
+    if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message || "Revise os dados." }, { status: 400 });
+    try {
+      const value = parsed.data;
+      const id = saveLocalBoResource({ ...value, boCode: value.boCode.toUpperCase() }, actor.user.user_id, actor.user.display_name);
+      return NextResponse.json({ ok: true, id });
+    } catch (error) {
+      return localResourceError(error);
+    }
+  }
   const ctx = await context(); if (!ctx) return NextResponse.json({ error: "Sessão encerrada." }, { status: 401 });
   if (isDevelopmentSession(ctx.token)) return NextResponse.json({ error: "O modo de desenvolvimento exibe o estoque inicial em modo somente leitura. Entre com um usuário persistente para alterar." }, { status: 403 });
   const parsed = schema.safeParse(await request.json().catch(() => null));

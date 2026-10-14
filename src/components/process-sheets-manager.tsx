@@ -116,6 +116,7 @@ type ProcessSheet = {
 };
 
 const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
+const isLocalEdition = process.env.NEXT_PUBLIC_APP_ENVIRONMENT === "desktop";
 const pageSize = 30;
 const numberFormatter = new Intl.NumberFormat("pt-BR", {
   maximumFractionDigits: 1,
@@ -199,9 +200,23 @@ export function ProcessSheetsManager({
   }, [searchInput]);
 
   useEffect(() => {
-    if (!organizationId) return;
     const timer = window.setTimeout(async () => {
       try {
+        if (isLocalEdition) {
+          const [machineResponse, sheetResponse] = await Promise.all([
+            fetch("/api/local/machines", { cache: "no-store" }),
+            fetch("/api/local/process-sheets?templates=1", { cache: "no-store" }),
+          ]);
+          if (!machineResponse.ok || !sheetResponse.ok) throw new Error("Não foi possível carregar as prensas locais.");
+          const [data, sheets] = await Promise.all([machineResponse.json(), sheetResponse.json()]) as [Array<Machine & { is_active?: boolean }>, ProcessSheet[]];
+          const available = new Map(data.filter((machine) => machine.is_active !== false).map((machine) => [machine.code, machine]));
+          for (const sheet of sheets) {
+            if (sheet.machine_code && !available.has(sheet.machine_code)) available.set(sheet.machine_code, { code: sheet.machine_code, name: sheet.machine_code });
+          }
+          setMachines([...available.values()].sort((a, b) => a.code.localeCompare(b.code, "pt-BR")));
+          return;
+        }
+        if (!organizationId) return;
         const { data, error: machineError } = await withSupabaseTimeout(
           createClient()
             .from("machines")
@@ -221,10 +236,31 @@ export function ProcessSheetsManager({
   }, []);
 
   useEffect(() => {
-    if (!organizationId) return;
     let active = true;
     async function loadCatalog() {
       try {
+        if (isLocalEdition) {
+          const response = await fetch("/api/local/process-sheets?templates=1", { cache: "no-store" });
+          if (!response.ok) throw new Error("Não foi possível carregar as fichas locais.");
+          const sheets = await response.json() as ProcessSheet[];
+          const values = new Map<string, CatalogOption>();
+          for (const sheet of sheets) {
+            const candidates = [
+              ["alloy", sheet.alloy_code],
+              ["cooling_mode", String(sheet.parameters.cooling?.mode ?? "")],
+              ["billet_casing", String(sheet.parameters.billet?.casing ?? "")],
+            ] as const;
+            for (const [type, raw] of candidates) {
+              const label = raw.trim();
+              if (!label) continue;
+              const key = `${type}:${label.toLowerCase()}`;
+              if (!values.has(key)) values.set(key, { id: key, catalog_type: type, code: label, label, sort_order: values.size, is_active: true });
+            }
+          }
+          if (active) setCatalog([...values.values()]);
+          return;
+        }
+        if (!organizationId) return;
         const { data, error: catalogError } = await withSupabaseTimeout(
           createClient()
             .from("operational_catalogs")
@@ -265,6 +301,13 @@ export function ProcessSheetsManager({
 
     async function loadTemplates() {
       try {
+        if (isLocalEdition) {
+          const response = await fetch("/api/local/process-sheets?templates=1", { cache: "no-store" });
+          if (!response.ok) throw new Error("Não foi possível buscar fichas modelo.");
+          const data = await response.json();
+          if (!cancelled) setTemplateOptions((data as ProcessSheet[]).filter((sheet) => sheet.is_active));
+          return;
+        }
         if (!organizationId) throw new Error("Organização não configurada.");
         const { data, error: templateError } = await withSupabaseTimeout(
           createClient()
@@ -298,12 +341,23 @@ export function ProcessSheetsManager({
   }, [requestedToolCode]);
 
   useEffect(() => {
-    if (!organizationId || !search) return;
+    if ((!isLocalEdition && !organizationId) || !search) return;
     let cancelled = false;
     const timer = window.setTimeout(async () => {
       setLoadingCuts(true);
       try {
         const token = sanitizeToken(search);
+        if (isLocalEdition) {
+          const response = await fetch("/api/local/process-sheets?templates=1", { cache: "no-store" });
+          if (!response.ok) throw new Error("Não foi possível consultar os comprimentos locais.");
+          const data = await response.json() as ProcessSheet[];
+          const values = [...new Set(data
+            .filter((row) => normalizeCode(row.product_code || row.tool_code).includes(token))
+            .map((row) => cutLengthMm(row.parameters))
+            .filter((value): value is number => value != null && value > 0))].sort((a, b) => a - b);
+          if (!cancelled) setCutOptions(values);
+          return;
+        }
         const { data, error: cutError } = await withSupabaseTimeout(
           createClient()
             .from("process_sheets")
@@ -405,13 +459,25 @@ export function ProcessSheetsManager({
   );
 
   const load = useCallback(async () => {
-    if (!organizationId) {
+    if (!isLocalEdition && !organizationId) {
       setError("Organização padrão não configurada.");
       setLoading(false);
       return;
     }
     setLoading(true);
     try {
+      if (isLocalEdition) {
+        const params = new URLSearchParams({ page: String(page), search });
+        if (machineFilter) params.set("machine", machineFilter);
+        if (cutFilter) params.set("cut", cutFilter);
+        const response = await fetch(`/api/local/process-sheets?${params.toString()}`, { cache: "no-store" });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Não foi possível carregar as fichas locais.");
+        setError("");
+        setSheets(result.data as ProcessSheet[]);
+        setTotal(Number(result.count ?? 0));
+        return;
+      }
       const supabase = createClient();
       let query = supabase
         .from("process_sheets")
@@ -526,7 +592,7 @@ export function ProcessSheetsManager({
     setSaving(true);
     setError("");
     setMessage("");
-    if (!organizationId) {
+    if (!isLocalEdition && !organizationId) {
       setError("Organização padrão não configurada.");
       setSaving(false);
       return;
@@ -640,51 +706,55 @@ export function ProcessSheetsManager({
       parameters,
       is_active: form.get("is_active") === "on",
     };
-    const supabase = createClient();
-    const query =
-      draft && !newSequence
-        ? supabase.from("process_sheets").update(payload).eq("id", draft.id)
-        : supabase.from("process_sheets").insert({
-            ...payload,
-            copied_from_process_sheet_id: draft?.id ?? null,
-            copied_from_sequence:
-              draft == null ? null : draft.tool_sequence ?? draft.revision,
-            achieved_productivity_kg_h: null,
-            achieved_productivity_recorded_at: null,
-          });
     try {
-      const { error: saveError } = await withSupabaseTimeout(query);
-      if (saveError)
-        setError(
-          saveError.code === "23505"
-            ? "Já existe uma ficha para esta ferramenta, sequência, liga e prensa."
-            : saveError.message,
-        );
-      else {
-        const shouldReturn = returnToProduction && Boolean(requestedToolCode);
-        const savedToolCode = actualToolCode;
-        setMessage(
-          draft && !newSequence
-            ? "Ficha atualizada com sucesso."
-            : "Ficha de processo criada.",
-        );
-        setFormOpen(false);
-        setDraft(null);
-        setNewSequence(false);
-        setRequestedToolCode("");
-        setTargetSequence(null);
-        formElement.reset();
-        requestOfflineSync("process_sheets");
-        if (shouldReturn) {
-          router.push(`/producao?tool=${encodeURIComponent(savedToolCode)}`);
-          return;
+      if (isLocalEdition) {
+        const response = await fetch("/api/local/process-sheets", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...payload,
+            id: draft?.id ?? null,
+            new_sequence: newSequence,
+            copied_from_process_sheet_id: draft?.id ?? null,
+            copied_from_sequence: draft == null ? null : draft.tool_sequence ?? draft.revision,
+          }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Não foi possível salvar a ficha local.");
+      } else {
+        const supabase = createClient();
+        const query = draft && !newSequence
+          ? supabase.from("process_sheets").update(payload).eq("id", draft.id)
+          : supabase.from("process_sheets").insert({
+              ...payload,
+              copied_from_process_sheet_id: draft?.id ?? null,
+              copied_from_sequence: draft == null ? null : draft.tool_sequence ?? draft.revision,
+              achieved_productivity_kg_h: null,
+              achieved_productivity_recorded_at: null,
+            });
+        const { error: saveError } = await withSupabaseTimeout(query);
+        if (saveError) {
+          if (saveError.code === "23505") throw new Error("Já existe uma ficha para esta ferramenta, sequência, liga e prensa.");
+          throw new Error(saveError.message);
         }
-        await load();
       }
-    } catch {
-      setError(
-        "Não foi possível salvar. Verifique a conexão com o Supabase e tente novamente.",
-      );
+      const shouldReturn = returnToProduction && Boolean(requestedToolCode);
+      const savedToolCode = actualToolCode;
+      setMessage(draft && !newSequence ? "Ficha atualizada com sucesso." : "Ficha de processo criada.");
+      setFormOpen(false);
+      setDraft(null);
+      setNewSequence(false);
+      setRequestedToolCode("");
+      setTargetSequence(null);
+      formElement.reset();
+      if (!isLocalEdition) requestOfflineSync("process_sheets");
+      if (shouldReturn) {
+        router.push(`/producao?tool=${encodeURIComponent(savedToolCode)}`);
+        return;
+      }
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Não foi possível salvar a ficha.");
     } finally {
       setSaving(false);
     }
@@ -706,7 +776,9 @@ export function ProcessSheetsManager({
       const response = await fetch("/api/process-sheets/import", { method: "POST", body: form });
       const result = await response.json();
       if (!response.ok) { const details = Array.isArray(result.errors) && result.errors.length ? ` ${result.errors.join(" | ")}` : ""; throw new Error((result.error || "Não foi possível importar a planilha.") + details); }
-      setMessage(`${result.imported} fichas importadas para as prensas ${result.presses.join(" e ")}.${result.duplicatesMerged ? ` ${result.duplicatesMerged} linhas repetidas foram consolidadas.` : ""}`);
+      setMessage(result.alreadyImported
+        ? "Esta planilha já havia sido importada. Nenhuma ficha foi duplicada."
+        : `${result.imported} fichas importadas para as prensas ${result.presses.join(" e ")}.${result.duplicatesMerged ? ` ${result.duplicatesMerged} linhas repetidas foram consolidadas.` : ""}`);
       setPage(0); await load();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Não foi possível importar a planilha."); }
     finally { setImporting(false); }
@@ -1599,6 +1671,14 @@ function CatalogSelect({
   options: CatalogOption[];
   required?: boolean;
 }) {
+  if (isLocalEdition) {
+    return (
+      <div className="space-y-2">
+        <Label htmlFor={name}>{label}</Label>
+        <Input id={name} name={name} defaultValue={value ?? ""} required={required} placeholder={`Informe ${label.toLowerCase()}`} />
+      </div>
+    );
+  }
   const currentExists = options.some(
     (option) => option.label === value || option.code === value,
   );

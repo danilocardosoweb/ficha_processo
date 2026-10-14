@@ -1,18 +1,28 @@
-# AlumMES V1
+# TecnoMES Local
+
+> Esta pasta é a edição desktop e offline do TecnoMES. Ela não será publicada na Vercel e está sendo migrada gradualmente para SQLite. O plano de migração está em [docs/local-edition-plan.md](docs/local-edition-plan.md).
 
 MES para extrusão de alumínio centrado na Ordem de Produção, com preparação de ferramentas, execução no chão de fábrica e inteligência para o PCP.
 
-## Entregue nesta versao
+## Recursos herdados do aplicativo web
 
-- Login local seguro, usuários, perfis, prensas e trilha de auditoria
+Os itens abaixo continuam disponíveis no código compartilhado, mas ainda não foram migrados para a edição desktop local. Não considere esses fluxos prontos para operação offline.
+
 - Importação de Simplificadas Excel, carteira e histórico de planejamentos
 - Fila FIFO de Planos e controle do ciclo de vida dos itens
-- Fichas de processo, cadastro e histórico de ferramentas
 - Controle de 3 fornos por prensa, 7 posições por forno e aquecimento rastreável
 - Assistente de extrusão e calculadora de tarugos, peças e tolerâncias
 - Apontamentos de paradas integrados à Manutenção
 - Mensagens operacionais por usuário, perfil, prensa ou toda a operação
 - Operação offline para consultas críticas e arquitetura pronta para futuro CLP
+
+## Já migrado para a edição local
+
+- Acesso individual, sessões e auditoria em SQLite
+- Cadastro e edição local de prensas e ferramentas, com pesquisa e validação
+- Importação do histórico de ferramentas com identificação do arquivo e proteção contra repetição
+- Importação, consulta, edição e cópia de fichas de processo no SQLite
+- Instalador Windows independente, com dados persistidos no computador
 
 ## Executar localmente
 
@@ -24,6 +34,16 @@ npm run dev
 ```
 
 Abra `http://localhost:3000`.
+
+## Aplicativo desktop
+
+Para executar a edição local em desenvolvimento:
+
+```bash
+npm run desktop:dev
+```
+
+O primeiro acesso cria o administrador local e salva os dados no computador. Para gerar o instalador Windows, use `npm run desktop:package` após concluir as migrações de cada domínio.
 
 ## Conectar ao Supabase
 

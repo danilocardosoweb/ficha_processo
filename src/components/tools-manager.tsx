@@ -52,6 +52,7 @@ type Tool = {
   carcass_code: string | null;
 };
 const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
+const isLocalEdition = process.env.NEXT_PUBLIC_APP_ENVIRONMENT === "desktop";
 const pageSize = 25;
 const toolName = (tool: Tool) =>
   tool.matrix_code || tool.description?.replace(/^Perfil\s+/i, "") || tool.code;
@@ -109,13 +110,26 @@ export function ToolsManager() {
   );
 
   const load = useCallback(async () => {
-    if (!organizationId) {
+    if (!isLocalEdition && !organizationId) {
       setError("Organização padrão não configurada.");
       setLoading(false);
       return;
     }
     setLoading(true);
     try {
+      if (isLocalEdition) {
+        const query = new URLSearchParams({ page: String(page), search });
+        const response = await fetch(`/api/local/tools?${query.toString()}`, { cache: "no-store" });
+        const result = await response.json();
+        if (!response.ok) {
+          setError(result.error || "Não foi possível carregar as ferramentas locais.");
+        } else {
+          setError("");
+          setTools((result.data ?? []) as Tool[]);
+          setTotal(Number(result.count ?? 0));
+        }
+        return;
+      }
       let query = createClient()
         .from("tools")
         .select(
@@ -149,7 +163,9 @@ export function ToolsManager() {
         setTotal(count ?? 0);
       }
     } catch {
-      if (
+      if (isLocalEdition) {
+        setError("Não foi possível acessar o banco local. Feche e abra o aplicativo novamente.");
+      } else if (
         !(await showCached(
           "Modo offline: exibindo o cadastro salvo neste computador.",
         ))
@@ -178,11 +194,6 @@ export function ToolsManager() {
     setSaving(true);
     setError("");
     setMessage("");
-    if (!organizationId) {
-      setError("Organização padrão não configurada.");
-      setSaving(false);
-      return;
-    }
     const form = new FormData(event.currentTarget);
     const matrixCode = String(form.get("matrix_code") ?? "")
       .trim()
@@ -191,7 +202,6 @@ export function ToolsManager() {
     const packageMeasureMm = Number(form.get("package_measure_mm")) || null;
     const carcassDiameterMm = Number(form.get("carcass_diameter_mm")) || null;
     const payload = {
-      organization_id: organizationId,
       code:
         editing?.code ||
         `MANUAL:${matrixCode}:${String(sequence).padStart(3, "0")}`,
@@ -208,6 +218,7 @@ export function ToolsManager() {
       lifecycle_kg: Number(form.get("produced_kg")) || 0,
       produced_kg: Number(form.get("produced_kg")) || 0,
       status: String(form.get("status") ?? "available"),
+      machine_codes: String(form.get("machine_codes") ?? "").trim() || null,
       package_measure_mm: packageMeasureMm,
       carcass_diameter_mm: carcassDiameterMm,
       carcass_code:
@@ -215,10 +226,31 @@ export function ToolsManager() {
           ? `${carcassDiameterMm}X${packageMeasureMm}`
           : null,
     };
-    const query = editing
-      ? createClient().from("tools").update(payload).eq("id", editing.id)
-      : createClient().from("tools").insert(payload);
     try {
+      if (isLocalEdition) {
+        const response = await fetch("/api/local/tools", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: editing?.id ?? null, ...payload }),
+        });
+        const result = await response.json();
+        if (!response.ok) setError(result.error || "Não foi possível salvar a ferramenta local.");
+        else {
+          setMessage(editing ? "Ferramenta atualizada." : "Ferramenta cadastrada.");
+          setFormOpen(false);
+          setEditing(null);
+          await load();
+        }
+        return;
+      }
+      if (!organizationId) {
+        setError("Organização padrão não configurada.");
+        return;
+      }
+      const onlinePayload = { ...payload, organization_id: organizationId };
+      const query = editing
+        ? createClient().from("tools").update(onlinePayload).eq("id", editing.id)
+        : createClient().from("tools").insert(onlinePayload);
       const { error: saveError } = await withSupabaseTimeout(query);
       if (saveError)
         setError(
@@ -237,7 +269,7 @@ export function ToolsManager() {
       }
     } catch {
       setError(
-        "Não foi possível salvar. Verifique a conexão com o Supabase e tente novamente.",
+        isLocalEdition ? "Não foi possível salvar no banco local. Tente novamente." : "Não foi possível salvar. Verifique a conexão com o Supabase e tente novamente.",
       );
     } finally {
       setSaving(false);
@@ -258,7 +290,7 @@ export function ToolsManager() {
           <ToolHistoryImport
             onImported={() => {
               setPage(0);
-              requestOfflineSync("tools");
+              if (!isLocalEdition) requestOfflineSync("tools");
               void load();
             }}
           />
@@ -354,7 +386,7 @@ export function ToolsManager() {
                       {toolName(tool)}
                     </td>
                     <td className="px-4 py-3 font-semibold">
-                      {tool.sequence_number ?? "—"}
+                      {tool.sequence_number && tool.sequence_number > 0 ? tool.sequence_number : "—"}
                     </td>
                     <td className="px-4 py-3">{tool.holes ?? "—"}</td>
                     <td className="px-4 py-3">
@@ -566,6 +598,12 @@ export function ToolsManager() {
                 step="0.001"
                 min="0"
                 defaultValue={editing?.useful_life_kg ?? ""}
+              />
+              <Field
+                label="Prensas"
+                name="machine_codes"
+                defaultValue={editing?.machine_codes ?? ""}
+                placeholder="Ex.: 18, 19"
               />
             </div>
             <div className="space-y-2">

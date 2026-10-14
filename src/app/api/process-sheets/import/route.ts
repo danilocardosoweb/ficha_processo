@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
 import * as XLSX from "xlsx";
+import { createHash } from "node:crypto";
+import { getLocalCatalogActor } from "@/lib/local-db/catalog-route-auth";
+import { importLocalProcessSheets } from "@/lib/local-db/catalogs";
+import { isLocalDesktopMode } from "@/lib/local-db/mode";
 import { getCurrentUser, getSessionToken } from "@/lib/local-auth/server";
 import { createClient } from "@/lib/supabase/server";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
 const text = (value: unknown) => String(value ?? "").trim();
@@ -20,14 +27,23 @@ const positiveOrNull = (value: number | null) =>
   value !== null && value > 0 ? value : null;
 
 export async function POST(request: Request) {
-  const token = await getSessionToken();
-  if (!token || !organizationId) return NextResponse.json({ error: "Sessão ou organização não configurada." }, { status: 401 });
+  const localEdition = isLocalDesktopMode();
+  let currentUser: Awaited<ReturnType<typeof getCurrentUser>> = null;
+  if (localEdition) {
+    const context = await getLocalCatalogActor();
+    if (context.response) return context.response;
+    currentUser = context.user;
+  } else {
+    const token = await getSessionToken();
+    if (!token || !organizationId) return NextResponse.json({ error: "Sessão ou organização não configurada." }, { status: 401 });
+    currentUser = await getCurrentUser();
+  }
   const form = await request.formData();
-  const currentUser = await getCurrentUser();
   const changedBy = currentUser?.display_name || "Importação de planilha";
   const file = form.get("file");
   if (!(file instanceof File)) return NextResponse.json({ error: "Selecione uma planilha Excel." }, { status: 400 });
-  const workbook = XLSX.read(Buffer.from(await file.arrayBuffer()), { type: "buffer", cellDates: false });
+  const fileBytes = Buffer.from(await file.arrayBuffer());
+  const workbook = XLSX.read(fileBytes, { type: "buffer", cellDates: false });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
   const valid = rows.map((row, index) => {
@@ -79,7 +95,7 @@ export async function POST(request: Request) {
       notes: text(row["Observação_processo"]) || "",
       legacy: { source_code: text(row["Código"]) || null },
     };
-    return { value: { organization_id: organizationId, machine_code: machine, tool_code: tool, product_code: tool, alloy_code: alloy, temper: text(row["Têmpera"]) || null, revision: sequence, tool_sequence: sequence, parameters, is_active: true, source_system: "excel", source_file: file.name, source_row: index + 2, last_changed_by_name: changedBy, last_change_reason: "Importação da ficha de processo pela planilha" } };
+    return { value: { ...(localEdition ? {} : { organization_id: organizationId }), machine_code: machine, tool_code: tool, product_code: tool, alloy_code: alloy, temper: text(row["Têmpera"]) || null, revision: sequence, tool_sequence: sequence, parameters, is_active: true, source_system: "excel", source_file: file.name, source_row: index + 2, last_changed_by_name: changedBy, last_change_reason: "Importação da ficha de processo pela planilha" } };
   });
   const errors = valid.filter((item) => "error" in item).map((item) => (item as { error: string }).error);
   const rawPayload = valid.filter((item) => "value" in item).map((item) => (item as { value: Record<string, unknown> }).value);
@@ -87,6 +103,37 @@ export async function POST(request: Request) {
   for (const item of rawPayload) uniquePayload.set(`${item.machine_code}|${item.tool_code}|${item.alloy_code}|${item.tool_sequence}`, item);
   const payload = [...uniquePayload.values()];
   if (errors.length) return NextResponse.json({ error: "A planilha possui linhas que precisam ser corrigidas.", errors: errors.slice(0, 20), totalErrors: errors.length }, { status: 400 });
+  if (localEdition) {
+    try {
+      const result = importLocalProcessSheets({
+        fileHash: createHash("sha256").update(fileBytes).digest("hex"),
+        fileName: file.name,
+        rows: payload.map((item) => ({
+          machine_code: String(item.machine_code),
+          tool_code: String(item.tool_code),
+          product_code: item.product_code == null ? null : String(item.product_code),
+          alloy_code: String(item.alloy_code),
+          temper: item.temper == null ? null : String(item.temper),
+          revision: Number(item.revision),
+          tool_sequence: item.tool_sequence == null ? null : Number(item.tool_sequence),
+          parameters: item.parameters as Record<string, unknown>,
+          is_active: true,
+          source_system: "excel",
+          source_file: file.name,
+          source_row: Number(item.source_row),
+        })),
+      }, currentUser!.user_id);
+      return NextResponse.json({
+        imported: result.imported,
+        alreadyImported: result.duplicate,
+        duplicatesMerged: rawPayload.length - payload.length,
+        presses: [...new Set(payload.map((item) => item.machine_code))],
+        sourceFile: file.name,
+      });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : "Não foi possível gravar as fichas locais." }, { status: 400 });
+    }
+  }
   const supabase = await createClient();
   const { error } = await supabase.from("process_sheets").upsert(payload, { onConflict: "organization_id,machine_code,tool_code,alloy_code,tool_sequence" });
   if (error) return NextResponse.json({ error: error.message }, { status: 400 });

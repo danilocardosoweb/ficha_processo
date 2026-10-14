@@ -16,6 +16,7 @@ type Machine = {
 };
 
 const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
+const isLocalEdition = process.env.NEXT_PUBLIC_APP_ENVIRONMENT === "desktop";
 
 export function MachineManager() {
   const [machines, setMachines] = useState<Machine[]>([]);
@@ -24,11 +25,26 @@ export function MachineManager() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [sharedOnline, setSharedOnline] = useState(true);
+  const [canEdit, setCanEdit] = useState(true);
 
   const load = useCallback(async () => {
-    if (!organizationId) { setError("Organizacao padrao nao configurada."); setLoading(false); return; }
+    if (!isLocalEdition && !organizationId) { setError("Organizacao padrao nao configurada."); setLoading(false); return; }
     setLoading(true);
     try {
+      if (isLocalEdition) {
+        const response = await fetch("/api/local/machines", { cache: "no-store" });
+        const result = await response.json();
+        if (!response.ok) setError(result.error || "Não foi possível carregar as prensas locais.");
+        else {
+          const online = response.headers.get("X-TecnoMES-Shared-State") === "online";
+          setSharedOnline(online);
+          setCanEdit(online && response.headers.get("X-TecnoMES-Can-Edit") === "true");
+          setError(online ? "" : "Sem acesso à base compartilhada. Estes dados são apenas a cópia deste computador; alterações estão bloqueadas.");
+          setMachines(result as Machine[]);
+        }
+        return;
+      }
       const { data, error: loadError } = await withSupabaseTimeout(createClient()
         .from("machines")
         .select("id,code,name,capacity_tons,is_active")
@@ -36,7 +52,7 @@ export function MachineManager() {
         .order("code"));
       if (loadError) setError(loadError.message);
       else { setError(""); setMachines((data ?? []) as Machine[]); }
-    } catch { setError("Nao foi possivel conectar ao Supabase. Verifique a internet e recarregue a pagina."); }
+    } catch { setError(isLocalEdition ? "Não foi possível acessar o banco local. Feche e abra o aplicativo novamente." : "Nao foi possivel conectar ao Supabase. Verifique a internet e recarregue a pagina."); if (isLocalEdition) { setSharedOnline(false); setCanEdit(false); } }
     finally { setLoading(false); }
   }, []);
 
@@ -49,22 +65,34 @@ export function MachineManager() {
     event.preventDefault(); setSaving(true); setError(""); setMessage("");
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
-    if (!organizationId) { setError("Organizacao padrao nao configurada."); setSaving(false); return; }
-    const payload = {
-      organization_id: organizationId,
+    if (!isLocalEdition && !organizationId) { setError("Organizacao padrao nao configurada."); setSaving(false); return; }
+    const fields = {
       code: String(form.get("code")).trim().toUpperCase(),
       name: String(form.get("name")).trim(),
       capacity_tons: Number(form.get("capacity_tons")) || null,
       is_active: form.get("is_active") === "on",
     };
-    const query = editing
-      ? createClient().from("machines").update(payload).eq("id", editing.id)
-      : createClient().from("machines").insert(payload);
     try {
+      if (isLocalEdition) {
+        const response = await fetch("/api/local/machines", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: editing?.id ?? null, ...fields }),
+        });
+        const result = await response.json();
+        if (!response.ok) setError(result.error || "Não foi possível salvar a prensa local.");
+        else { setMessage(editing ? "Prensa atualizada." : "Prensa cadastrada."); setEditing(null); formElement.reset(); await load(); }
+        return;
+      }
+      if (!organizationId) { setError("Organizacao padrao nao configurada."); return; }
+      const payload = { organization_id: organizationId, ...fields };
+      const query = editing
+        ? createClient().from("machines").update(payload).eq("id", editing.id)
+        : createClient().from("machines").insert(payload);
       const { error: saveError } = await withSupabaseTimeout(query);
       if (saveError) setError(saveError.code === "23505" ? "Ja existe uma prensa com este codigo." : saveError.message);
       else { setMessage(editing ? "Prensa atualizada." : "Prensa cadastrada."); setEditing(null); formElement.reset(); await load(); }
-    } catch { setError("Nao foi possivel salvar. Verifique a conexao com o Supabase e tente novamente."); }
+    } catch { setError(isLocalEdition ? "Não foi possível confirmar o cadastro na base compartilhada. Confira a rede e atualize antes de tentar novamente." : "Nao foi possivel salvar. Verifique a conexao com o Supabase e tente novamente."); }
     finally { setSaving(false); }
   }
 
@@ -79,7 +107,7 @@ export function MachineManager() {
       </div>
       {error && <p role="alert" className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
       {message && <p role="status" className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{message}</p>}
-      <Button type="submit" className="mt-5 h-11 w-full bg-orange-500 font-semibold hover:bg-orange-600" disabled={saving}>{saving ? <Loader2 className="animate-spin" /> : <Plus className="size-4" />}{editing ? "Salvar alteracoes" : "Cadastrar prensa"}</Button>
+      <Button type="submit" className="mt-5 h-11 w-full bg-orange-500 font-semibold hover:bg-orange-600" disabled={saving || (isLocalEdition && (!sharedOnline || !canEdit))}>{saving ? <Loader2 className="animate-spin" /> : <Plus className="size-4" />}{editing ? "Salvar alteracoes" : "Cadastrar prensa"}</Button>
     </form>
     <section className="rounded-xl border bg-white p-6 shadow-sm">
       <div className="flex items-center justify-between"><div><h2 className="font-heading font-bold">Prensas cadastradas</h2><p className="mt-1 text-xs text-slate-500">{machines.length} equipamento(s) disponivel(is).</p></div></div>
