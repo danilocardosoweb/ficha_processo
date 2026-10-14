@@ -41,6 +41,7 @@ type PreviewRow = {
 };
 
 const organizationId = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
+const isLocalEdition = process.env.NEXT_PUBLIC_APP_ENVIRONMENT === "desktop";
 const normalize = (value: string) =>
   value
     .normalize("NFD")
@@ -239,18 +240,22 @@ export function ToolHistoryImport({ onImported }: { onImported: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
   const [fileName, setFileName] = useState("");
+  const [fileHash, setFileHash] = useState("");
   const [rows, setRows] = useState<PreviewRow[]>([]);
   const [reading, setReading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
   const [done, setDone] = useState(false);
+  const [doneMessage, setDoneMessage] = useState("");
 
   function reset() {
     setFileName("");
+    setFileHash("");
     setRows([]);
     setError("");
     setDone(false);
+    setDoneMessage("");
     setProgress(0);
     if (inputRef.current) inputRef.current.value = "";
   }
@@ -264,6 +269,8 @@ export function ToolHistoryImport({ onImported }: { onImported: () => void }) {
     try {
       if (!/\.(xlsx|xls|xlsm|xlsb)$/i.test(file.name))
         throw new Error("Use um arquivo Excel XLSX, XLS, XLSM ou XLSB.");
+      const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+      setFileHash(Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(""));
       setRows(await parseWorkbook(file));
     } catch (cause) {
       setError(
@@ -276,31 +283,59 @@ export function ToolHistoryImport({ onImported }: { onImported: () => void }) {
     }
   }
   async function commit() {
-    if (!organizationId) {
+    if (!isLocalEdition && !organizationId) {
       setError("Organização padrão não configurada.");
+      return;
+    }
+    if (isLocalEdition && !fileHash) {
+      setError("Não consegui identificar este arquivo. Selecione a planilha novamente.");
       return;
     }
     setImporting(true);
     setError("");
     setProgress(0);
     try {
-      const supabase = createClient();
       const uniqueRows = [...new Map(rows.map((row) => [row.code, row])).values()];
       const chunkSize = 200;
+      const totalChunks = Math.ceil(uniqueRows.length / chunkSize);
+      const supabase = isLocalEdition ? null : createClient();
+      let alreadyImported = false;
       for (let start = 0; start < uniqueRows.length; start += chunkSize) {
-        const chunk = uniqueRows
-          .slice(start, start + chunkSize)
-          .map((row) => row.payload);
-        const { error: importError } = await supabase
-          .from("tools")
-          .upsert(chunk, { onConflict: "organization_id,code" });
-        if (importError) throw importError;
+        const batch = uniqueRows.slice(start, start + chunkSize);
+        if (isLocalEdition) {
+          const response = await fetch("/api/local/tools/import", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              file_hash: fileHash,
+              file_name: fileName,
+              chunk_index: Math.floor(start / chunkSize),
+              total_chunks: totalChunks,
+              rows: batch,
+            }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || "Falha ao gravar a etapa da importação.");
+          alreadyImported ||= Boolean(result.duplicate);
+          if (result.complete && result.duplicate) {
+            setProgress(100);
+            break;
+          }
+        } else {
+          const { error: importError } = await supabase!
+            .from("tools")
+            .upsert(batch.map((row) => row.payload), { onConflict: "organization_id,code" });
+          if (importError) throw importError;
+        }
         setProgress(
           Math.round(
             (Math.min(uniqueRows.length, start + chunkSize) / uniqueRows.length) * 100,
           ),
         );
       }
+      setDoneMessage(alreadyImported
+        ? "Este arquivo já havia sido importado. Nenhum registro foi duplicado."
+        : `${uniqueRows.length.toLocaleString("pt-BR")} ferramentas importadas ou atualizadas.`);
       setDone(true);
       onImported();
     } catch (cause) {
@@ -392,8 +427,7 @@ export function ToolHistoryImport({ onImported }: { onImported: () => void }) {
                 className="flex gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700"
               >
                 <CheckCircle2 className="mt-0.5 size-4 shrink-0" />
-                {rows.length.toLocaleString("pt-BR")} registros importados ou
-                atualizados.
+                {doneMessage}
               </div>
             )}
             {rows.length > 0 && (

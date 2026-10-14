@@ -26,6 +26,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { createClient } from "@/lib/supabase/client";
+import { subscribeToOvenBoard } from "@/lib/supabase/oven-realtime";
 import { requestOfflineSync } from "@/lib/offline-store";
 import { cn } from "@/lib/utils";
 import { useCurrentUser } from "@/components/current-user-provider";
@@ -171,9 +172,14 @@ export function ToolOvenBoard() {
   const [collapsedStages, setCollapsedStages] = useState({ waiting: false, heating: false, released: false });
   const [boardView, setBoardView] = useState<"cards" | "map">("cards");
   const loadingRef = useRef(false);
+  const realtimeRefreshRef = useRef<number | null>(null);
   const seenConflictSignature = useRef("");
   const [conflictDialogOpen, setConflictDialogOpen] = useState(false);
   const machineFilterStorageKey = `tecnomes:tool-oven-board:machine-filter:${userId}`;
+  const queryMachineCodes = useMemo(() => {
+    if (machineFilter && (!allowedMachines || allowedMachines.has(machineFilter))) return [machineFilter];
+    return allowedMachines ? [...allowedMachines].sort() : undefined;
+  }, [allowedMachines, machineFilter]);
 
   useEffect(() => {
     let active = true;
@@ -211,11 +217,15 @@ export function ToolOvenBoard() {
     if (!silent) setLoading(true);
     try {
       const supabase = createClient();
-      const [{ data: orderData, error: orderError }, { data: cycleData, error: cycleError }, { data: ovenData, error: ovenError }] = await Promise.all([
-        supabase.from("production_orders").select(`${orderFields},simplified_imports!inner(id,is_active,status,deleted_at)`).eq("organization_id", organizationId).eq("is_active", true).in("status", ["planned", "released", "paused"]).eq("simplified_imports.is_active", true).eq("simplified_imports.status", "processed").is("simplified_imports.deleted_at", null).order("sequence").limit(1000),
-        supabase.from("tool_heating_cycles").select(`id,import_batch_id,machine_code,tool_code,oven_code,oven_id,oven_position,tool_type,target_temperature_c,maximum_due_at,status,required_minutes,entered_at,expected_ready_at,released_at,entered_by_name,released_by_name,released_early,actual_heating_minutes,notes,release_notes,tool_heating_cycle_orders(production_order_id,production_orders(${cycleOrderFields}))`).eq("organization_id", organizationId).in("status", ["heating", "released"]).order("entered_at", { ascending: false }).limit(200),
-        supabase.from("tool_ovens").select("id,machine_code,code,name,position_count,solid_minimum_minutes,tubular_minimum_minutes,maximum_minutes,solid_target_temperature_c,tubular_target_temperature_c,is_active").eq("organization_id", organizationId).eq("is_active", true).order("machine_code").order("code"),
-      ]);
+      let ordersQuery = supabase.from("production_orders").select(`${orderFields},simplified_imports!inner(id,is_active,status,deleted_at)`).eq("organization_id", organizationId).eq("is_active", true).in("status", ["planned", "released", "paused"]).eq("simplified_imports.is_active", true).eq("simplified_imports.status", "processed").is("simplified_imports.deleted_at", null).order("sequence").limit(1000);
+      let cyclesQuery = supabase.from("tool_heating_cycles").select(`id,import_batch_id,machine_code,tool_code,oven_code,oven_id,oven_position,tool_type,target_temperature_c,maximum_due_at,status,required_minutes,entered_at,expected_ready_at,released_at,entered_by_name,released_by_name,released_early,actual_heating_minutes,notes,release_notes,tool_heating_cycle_orders(production_order_id,production_orders(${cycleOrderFields}))`).eq("organization_id", organizationId).in("status", ["heating", "released"]).order("entered_at", { ascending: false }).limit(200);
+      let ovensQuery = supabase.from("tool_ovens").select("id,machine_code,code,name,position_count,solid_minimum_minutes,tubular_minimum_minutes,maximum_minutes,solid_target_temperature_c,tubular_target_temperature_c,is_active").eq("organization_id", organizationId).eq("is_active", true).order("machine_code").order("code");
+      if (queryMachineCodes?.length) {
+        ordersQuery = ordersQuery.in("machine_code", queryMachineCodes);
+        cyclesQuery = cyclesQuery.in("machine_code", queryMachineCodes);
+        ovensQuery = ovensQuery.in("machine_code", queryMachineCodes);
+      }
+      const [{ data: orderData, error: orderError }, { data: cycleData, error: cycleError }, { data: ovenData, error: ovenError }] = await Promise.all([ordersQuery, cyclesQuery, ovensQuery]);
       if (orderError) throw orderError;
       if (cycleError) throw cycleError;
       if (ovenError) throw ovenError;
@@ -225,16 +235,49 @@ export function ToolOvenBoard() {
       setMessage("");
     } catch (error) { setMessage(errorMessage(error)); }
     finally { loadingRef.current = false; if (!silent) setLoading(false); }
-  }, [setMessage]);
+  }, [queryMachineCodes, setMessage]);
 
-  useEffect(() => { const initialLoad = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(initialLoad); }, [load]);
+  const scheduleRealtimeRefresh = useCallback(() => {
+    if (document.visibilityState !== "visible") return;
+    if (realtimeRefreshRef.current !== null) window.clearTimeout(realtimeRefreshRef.current);
+    realtimeRefreshRef.current = window.setTimeout(() => {
+      realtimeRefreshRef.current = null;
+      void load(true);
+    }, 250);
+  }, [load]);
+
+  useEffect(() => {
+    if (!machineFilterReady) return;
+    const initialLoad = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(initialLoad);
+  }, [load, machineFilterReady]);
   useEffect(() => { const tick = () => setNow(Date.now()); const initialTick = window.setTimeout(tick, 0); const timer = window.setInterval(tick, 1000); return () => { window.clearTimeout(initialTick); window.clearInterval(timer); }; }, []);
   useEffect(() => {
     const refreshIfVisible = () => { if (document.visibilityState === "visible") void load(true); };
-    const timer = window.setInterval(refreshIfVisible, 60_000);
+    const timer = window.setInterval(refreshIfVisible, 5 * 60_000);
     document.addEventListener("visibilitychange", refreshIfVisible);
     return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", refreshIfVisible); };
   }, [load]);
+  useEffect(() => {
+    if (!organizationId) return;
+    const cleanup = subscribeToOvenBoard(createClient(), {
+      organizationId,
+      machineCodes: queryMachineCodes,
+      onChange: scheduleRealtimeRefresh,
+      onStatus: (status) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          setMessage("Atualização em tempo real indisponível; usando sincronização de segurança.");
+        }
+      },
+    });
+    return () => {
+      if (realtimeRefreshRef.current !== null) {
+        window.clearTimeout(realtimeRefreshRef.current);
+        realtimeRefreshRef.current = null;
+      }
+      cleanup();
+    };
+  }, [queryMachineCodes, scheduleRealtimeRefresh]);
 
   const linkedOrderIds = useMemo(() => new Set(cycles.flatMap((cycle) => cycle.tool_heating_cycle_orders.map((link) => link.production_order_id))), [cycles]);
   const effectiveMachineFilter = machineFilter && (!allowedMachines || allowedMachines.has(machineFilter)) ? machineFilter : "";

@@ -3,7 +3,7 @@
 /* The operational board intentionally polls external state and uses a wall clock for countdowns. */
 /* eslint-disable react-hooks/set-state-in-effect, react-hooks/purity */
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode, type TextareaHTMLAttributes } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
+import { subscribeToOvenBoard } from "@/lib/supabase/oven-realtime";
 import { requestOfflineSync } from "@/lib/offline-store";
 import type { LocalUser } from "@/lib/local-auth/types";
 import { cn } from "@/lib/utils";
@@ -135,6 +136,8 @@ export function OvenOperational({ user }: { user: LocalUser }) {
   const [limitReason, setLimitReason] = useState("");
   const [query, setQuery] = useState("");
   const [machineFilterReady, setMachineFilterReady] = useState(false);
+  const loadingRef = useRef(false);
+  const realtimeRefreshRef = useRef<number | null>(null);
   const machineFilterKey = `tecnomes:forno-operacional:machine-filter:${user.user_id}`;
 
   const load = useCallback(async (silent = false) => {
@@ -143,13 +146,15 @@ export function OvenOperational({ user }: { user: LocalUser }) {
       setLoading(false);
       return;
     }
+    if (loadingRef.current) return;
+    loadingRef.current = true;
     if (!silent) setLoading(true); else setRefreshing(true);
     try {
       const supabase = createClient();
       const [{ data: orderData, error: orderError }, { data: cycleData, error: cycleError }, { data: ovenData, error: ovenError }] = await Promise.all([
-        supabase.from("production_orders").select(`${orderFields},simplified_imports!inner(id,is_active,status,deleted_at)`).eq("organization_id", organizationId).eq("is_active", true).in("status", ["planned", "released", "paused"]).eq("simplified_imports.is_active", true).eq("simplified_imports.status", "processed").is("simplified_imports.deleted_at", null).order("sequence").limit(2000),
-        supabase.from("tool_heating_cycles").select(cycleFields).eq("organization_id", organizationId).in("status", ["heating", "released"]).order("entered_at", { ascending: false }).limit(500),
-        supabase.from("tool_ovens").select(ovenFields).eq("organization_id", organizationId).eq("is_active", true).order("machine_code").order("code"),
+        supabase.from("production_orders").select(`${orderFields},simplified_imports!inner(id,is_active,status,deleted_at)`).eq("organization_id", organizationId).eq("machine_code", machine).eq("is_active", true).in("status", ["planned", "released", "paused"]).eq("simplified_imports.is_active", true).eq("simplified_imports.status", "processed").is("simplified_imports.deleted_at", null).order("sequence").limit(2000),
+        supabase.from("tool_heating_cycles").select(cycleFields).eq("organization_id", organizationId).eq("machine_code", machine).in("status", ["heating", "released"]).order("entered_at", { ascending: false }).limit(500),
+        supabase.from("tool_ovens").select(ovenFields).eq("organization_id", organizationId).eq("machine_code", machine).eq("is_active", true).order("code"),
       ]);
       if (orderError) throw orderError;
       if (cycleError) throw cycleError;
@@ -161,10 +166,20 @@ export function OvenOperational({ user }: { user: LocalUser }) {
     } catch (error) {
       setNotice(errorMessage(error));
     } finally {
+      loadingRef.current = false;
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [machine]);
+
+  const scheduleRealtimeRefresh = useCallback(() => {
+    if (document.visibilityState !== "visible") return;
+    if (realtimeRefreshRef.current !== null) window.clearTimeout(realtimeRefreshRef.current);
+    realtimeRefreshRef.current = window.setTimeout(() => {
+      realtimeRefreshRef.current = null;
+      void load(true);
+    }, 250);
+  }, [load]);
 
   useEffect(() => {
     let active = true;
@@ -181,9 +196,36 @@ export function OvenOperational({ user }: { user: LocalUser }) {
   useEffect(() => { if (machineFilterReady) try { window.localStorage.setItem(machineFilterKey, machine); } catch {} }, [machine, machineFilterKey, machineFilterReady]);
   useEffect(() => {
     void load();
-    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void load(true); }, 15000);
-    return () => window.clearInterval(timer);
+    // O contador continua localmente em tempo real. O Realtime atualiza mudanças;
+    // esta sincronização lenta é apenas uma proteção contra queda de conexão.
+    const refreshIfVisible = () => { if (document.visibilityState === "visible") void load(true); };
+    const timer = window.setInterval(refreshIfVisible, 5 * 60_000);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
   }, [load]);
+  useEffect(() => {
+    if (!organizationId) return;
+    const cleanup = subscribeToOvenBoard(createClient(), {
+      organizationId,
+      machineCodes: [machine],
+      onChange: scheduleRealtimeRefresh,
+      onStatus: (status) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          setNotice("Atualização em tempo real indisponível; usando sincronização de segurança.");
+        }
+      },
+    });
+    return () => {
+      if (realtimeRefreshRef.current !== null) {
+        window.clearTimeout(realtimeRefreshRef.current);
+        realtimeRefreshRef.current = null;
+      }
+      cleanup();
+    };
+  }, [machine, scheduleRealtimeRefresh]);
   useEffect(() => {
     const tick = () => setClock(new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date()));
     const connection = () => setOnline(navigator.onLine);

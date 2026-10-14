@@ -2,9 +2,10 @@
 
 import { useState, type FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { ArrowRight, Eye, EyeOff, Layers3, LockKeyhole, UserRound } from "lucide-react";
 
-export function LoginForm() {
+export function LoginForm({ canConfigureFirstAccess = false }: { canConfigureFirstAccess?: boolean }) {
   const router = useRouter();
   const search = useSearchParams();
   const [showPassword, setShowPassword] = useState(false);
@@ -14,13 +15,28 @@ export function LoginForm() {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError(""); setLoading(true);
     const form = new FormData(event.currentTarget);
-    const response = await fetch("/api/session/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ login: form.get("login"), password: form.get("password") }) });
-    const result = await response.json().catch(() => ({}));
-    setLoading(false);
-    if (!response.ok) { setError(result.error || "Não foi possível entrar."); return; }
-    const next = search.get("next");
-    router.replace(result.mustChangePassword ? "/perfil" : next?.startsWith("/") ? next : "/dashboard");
-    router.refresh();
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 15_000);
+    try {
+      const response = await fetch("/api/session/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ login: form.get("login"), password: form.get("password") }),
+        signal: controller.signal,
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) { setError(result.error || "Não foi possível entrar."); return; }
+      const next = search.get("next");
+      router.replace(result.mustChangePassword ? "/perfil" : result.localMode ? "/local" : next?.startsWith("/") ? next : "/dashboard");
+      router.refresh();
+    } catch {
+      setError(controller.signal.aborted
+        ? "O serviço do aplicativo não respondeu em 15 segundos. Feche e abra o TecnoMES e tente novamente."
+        : "Não foi possível comunicar com o serviço do aplicativo. Feche e abra o TecnoMES e tente novamente.");
+    } finally {
+      window.clearTimeout(timeout);
+      setLoading(false);
+    }
   }
 
   return <main className="grid min-h-screen lg:grid-cols-[1.05fr_.95fr]">
@@ -36,7 +52,7 @@ export function LoginForm() {
       <label className="mt-4 block text-sm font-semibold text-slate-800">Senha<div className="mt-2 flex h-12 items-center gap-3 rounded-xl border px-3 focus-within:border-orange-500 focus-within:ring-3 focus-within:ring-orange-100"><LockKeyhole className="size-4 text-slate-400" /><input name="password" type={showPassword ? "text" : "password"} autoComplete="current-password" required className="min-w-0 flex-1 bg-transparent text-sm outline-none" /><button type="button" onClick={() => setShowPassword((value) => !value)} className="text-slate-400 hover:text-slate-700" aria-label={showPassword ? "Ocultar senha" : "Mostrar senha"}>{showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</button></div></label>
       {error && <p role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-medium text-red-700">{error}</p>}
       <button type="submit" disabled={loading} className="mt-6 inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-orange-500 px-5 text-sm font-bold text-white shadow-lg shadow-orange-200 transition hover:bg-orange-600 disabled:opacity-60">{loading ? "Validando..." : "Entrar no sistema"}<ArrowRight className="size-4" /></button>
-      <p className="mt-5 text-center text-xs text-slate-400">Sessão protegida · validade de 12 horas</p>
+      {canConfigureFirstAccess ? <Link href="/primeiro-acesso" className="mt-5 block text-center text-xs font-semibold text-orange-600 hover:text-orange-700">Configurar primeiro acesso deste computador</Link> : <p className="mt-5 text-center text-xs text-slate-400">Sessão protegida · validade de 12 horas</p>}
     </form></section>
   </main>;
 }

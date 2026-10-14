@@ -1,11 +1,13 @@
 import type { NextConfig } from "next";
 
-const appVersion = process.env.npm_package_version ?? "0.1.0";
-const appCommit = process.env.VERCEL_GIT_COMMIT_SHA ?? "local";
-const appEnvironment = process.env.VERCEL_ENV ?? "local";
+const appVersion = process.env.npm_package_version ?? "0.6.0";
+const appCommit = process.env.TECNOMES_APP_COMMIT ?? process.env.VERCEL_GIT_COMMIT_SHA ?? "local";
+const appEnvironment = process.env.TECNOMES_APP_ENVIRONMENT ?? process.env.VERCEL_ENV ?? "local";
 const appBuildDate = new Date().toISOString();
 
 const nextConfig: NextConfig = {
+  output: "standalone",
+  serverExternalPackages: ["better-sqlite3", "proper-lockfile"],
   env: {
     NEXT_PUBLIC_APP_VERSION: appVersion,
     NEXT_PUBLIC_APP_COMMIT: appCommit,

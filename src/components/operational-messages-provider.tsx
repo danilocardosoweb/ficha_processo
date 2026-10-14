@@ -15,6 +15,7 @@ type MessagesContextValue = {
 };
 
 const MessagesContext = createContext<MessagesContextValue | null>(null);
+const isLocalEdition = process.env.NEXT_PUBLIC_APP_ENVIRONMENT === "desktop";
 
 const priorityStyle = {
   info: { icon: Info, label: "Informação", tone: "border-blue-200 bg-blue-50 text-blue-800", accent: "text-blue-600" },
@@ -43,6 +44,12 @@ export function OperationalMessagesProvider({ children }: { children: ReactNode 
   const refresh = useCallback(async () => {
     if (refreshingRef.current) return refreshingRef.current;
     const request = (async () => {
+    if (isLocalEdition) {
+      setMessages([]);
+      setError("");
+      setLoading(false);
+      return;
+    }
     try {
       const response = await fetch("/api/messages", { cache: "no-store" });
       if (!response.ok) throw new Error("Falha ao carregar");

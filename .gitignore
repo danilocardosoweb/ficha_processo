@@ -19,7 +19,9 @@
 
 # production
 /build
+/dist
 /data/agent-workspace/
+/data/web-migration/
 
 # misc
 .DS_Store
@@ -44,3 +46,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# python
+__pycache__/
+*.pyc

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, BellRing, Boxes, ChartNoAxesCombined, ChevronLeft, ChevronRight, FileBarChart, FileCog, Flame, Gauge, History, Import, Menu, Settings, ShieldCheck, TimerReset, UnlockKeyhole, Wrench, NotebookTabs } from "lucide-react";
+import { Archive, BarChart3, BellRing, Boxes, ChartNoAxesCombined, ChevronLeft, ChevronRight, FileBarChart, FileCog, Flame, Gauge, HardDrive, History, Import, ListOrdered, Menu, Settings, ShieldCheck, TimerReset, UnlockKeyhole, Wrench, NotebookTabs } from "lucide-react";
 import { BrandMark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -11,10 +11,11 @@ import { cn } from "@/lib/utils";
 import { useCurrentUser } from "@/components/current-user-provider";
 import { canAccess, type AccessArea } from "@/lib/access-control";
 
-const releaseVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "0.1.0";
+const releaseVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "0.6.4";
 const releaseCommit = (process.env.NEXT_PUBLIC_APP_COMMIT ?? "local").slice(0, 7);
 const releaseEnvironment = process.env.NEXT_PUBLIC_APP_ENVIRONMENT ?? "local";
 const releaseBuildDate = process.env.NEXT_PUBLIC_APP_BUILD_DATE ?? "";
+const isLocalEdition = process.env.NEXT_PUBLIC_APP_ENVIRONMENT === "desktop";
 
 function formatBuildDate(value: string) {
   if (!value) return "data indisponível";
@@ -44,6 +45,18 @@ const navigationGroups = [
   ] },
 ] satisfies Array<{ label: string; items: Array<{ label: string; href: string; icon: typeof Gauge; permission: AccessArea }> }>;
 
+const localNavigationGroups = [
+  { label: "Aplicativo local", items: [
+    { label: "Início local", href: "/local", icon: HardDrive, permission: "dashboard" as AccessArea },
+    { label: "Prensas", href: "/prensas", icon: Gauge, permission: "dashboard" as AccessArea },
+    { label: "Ferramentas", href: "/ferramentas", icon: Wrench, permission: "dashboard" as AccessArea },
+    { label: "Carteira importada", href: "/carteira-local", icon: ChartNoAxesCombined, permission: "dashboard" as AccessArea },
+    { label: "Simplificadas", href: "/simplificadas-local", icon: ListOrdered, permission: "dashboard" as AccessArea },
+    { label: "Dados importados", href: "/dados-importados", icon: Archive, permission: "dashboard" as AccessArea },
+    { label: "Fila da programação", href: "/fila-programacao", icon: ListOrdered, permission: "planning" as AccessArea },
+  ] },
+] satisfies Array<{ label: string; items: Array<{ label: string; href: string; icon: typeof Gauge; permission: AccessArea }> }>;
+
 const settingsPaths = ["/configuracoes", "/prensas", "/ferramentas"];
 
 function NavLink({ label, href, icon: Icon, active, compact, onNavigate }: {
@@ -64,15 +77,16 @@ function NavContent({ compact = false, onNavigate, onToggle }: { compact?: boole
   const user = useCurrentUser();
   const allowedMachines = user.machine_codes ?? [];
   const canSeeMachine = (href: string) => user.role === "admin" || user.role === "manager" || user.role === "pcp" || href !== "/forno" || allowedMachines.length > 0;
+  const canSeeLocalCatalogs = user.role === "admin" || user.role === "manager" || user.role === "pcp" || user.role === "engineering";
   return (
     <div className="flex h-full flex-col overflow-hidden bg-[#111927] text-slate-200">
       <div className={cn("flex h-24 shrink-0 items-center transition-all", compact ? "justify-center px-3" : "px-6")}><BrandMark compact={compact} /></div>
       <nav className={cn("flex-1 overflow-y-auto pb-3", compact ? "px-2" : "px-3")} aria-label="Navegação principal">
-        {navigationGroups.map((group, groupIndex) => (
+        {(isLocalEdition ? localNavigationGroups : navigationGroups).map((group, groupIndex) => (
           <div key={group.label} className={cn(groupIndex > 0 && "mt-5")}>
             {!compact && <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-[.2em] text-slate-600">{group.label}</p>}
             <div className="space-y-1">
-              {group.items.filter((item) => canAccess(user.role, item.permission) && canSeeMachine(item.href)).map((item) => {
+              {group.items.filter((item) => canAccess(user.role, item.permission) && canSeeMachine(item.href) && (!isLocalEdition || item.href === "/local" || canSeeLocalCatalogs) && (!["/dados-importados", "/carteira-local", "/simplificadas-local"].includes(item.href) || user.role === "admin")).map((item) => {
                 const active = pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(item.href));
                 return <NavLink key={item.href} {...item} active={active} compact={compact} onNavigate={onNavigate} />;
               })}
@@ -81,7 +95,7 @@ function NavContent({ compact = false, onNavigate, onToggle }: { compact?: boole
         ))}
       </nav>
       <div className="shrink-0 space-y-1 border-t border-white/[.07] p-2.5">
-        {canAccess(user.role, "administration") && <NavLink label="Configurações" href="/configuracoes" icon={Settings} active={settingsPaths.some((path) => pathname.startsWith(path))} compact={compact} onNavigate={onNavigate} />}
+        {!isLocalEdition && canAccess(user.role, "administration") && <NavLink label="Configurações" href="/configuracoes" icon={Settings} active={settingsPaths.some((path) => pathname.startsWith(path))} compact={compact} onNavigate={onNavigate} />}
         {onToggle && (
           <button type="button" onClick={onToggle} aria-label={compact ? "Expandir menu" : "Recolher menu"} title={compact ? "Expandir menu" : undefined}
             className={cn("flex h-10 w-full items-center rounded-xl text-sm font-semibold text-slate-400 transition hover:bg-white/[.06] hover:text-white", compact ? "justify-center" : "gap-3 px-3")}

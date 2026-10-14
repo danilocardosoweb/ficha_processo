@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getOfflineSnapshot, syncOperationalData, type OfflineResource } from "@/lib/offline-store";
 
 type State = "syncing" | "online" | "offline" | "error";
+const isLocalEdition = process.env.NEXT_PUBLIC_APP_ENVIRONMENT === "desktop";
 
 export function OfflineStatus() {
   const [state, setState] = useState<State>("syncing");
@@ -13,6 +14,11 @@ export function OfflineStatus() {
   const requestedTimer = useRef<number | null>(null);
 
   const sync = useCallback(async (resources?: OfflineResource[], foreground = false, force = false) => {
+    if (isLocalEdition) {
+      setLastSync(new Date().toISOString());
+      setState("online");
+      return;
+    }
     if (!navigator.onLine) {
       setState("offline");
       return;
@@ -31,6 +37,11 @@ export function OfflineStatus() {
   }, []);
 
   useEffect(() => {
+    if (isLocalEdition) {
+      setLastSync(new Date().toISOString());
+      setState("online");
+      return;
+    }
     if ("serviceWorker" in navigator && process.env.NODE_ENV === "production")
       void navigator.serviceWorker.register("/sw.js", {
         scope: "/",
@@ -70,7 +81,7 @@ export function OfflineStatus() {
     const initialSync = window.setTimeout(() => void initialize(), 0);
     const interval = window.setInterval(
       () => {
-        if (navigator.onLine) void sync();
+        if (document.visibilityState === "visible" && navigator.onLine) void sync();
       },
       15 * 60 * 1000,
     );
@@ -86,7 +97,9 @@ export function OfflineStatus() {
   }, [sync]);
 
   const label =
-    state === "syncing"
+    isLocalEdition
+      ? "Aplicativo local · banco SQLite"
+      : state === "syncing"
       ? "Salvando dados locais..."
       : state === "online"
         ? "Operação online · dados salvos"

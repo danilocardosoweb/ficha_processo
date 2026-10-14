@@ -1,10 +1,17 @@
 {
-  "name": "extrusion-mes-v1",
-  "version": "0.1.0",
+  "name": "tecnomes-local",
+  "version": "0.6.7",
+  "description": "TecnoMES Local - aplicativo desktop para operação de extrusão sem dependência de nuvem.",
+  "author": "Tecnoperfil",
   "private": true,
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "next dev",
+    "desktop:dev": "npm rebuild better-sqlite3 && concurrently --kill-others-on-fail \"node electron/run-next-dev.cjs\" \"wait-on http://127.0.0.1:3210 && electron .\"",
     "build": "next build",
+    "desktop:build": "node electron/run-next-build.cjs",
+    "desktop:package": "npm run desktop:build && npm run desktop:rebuild && node electron/sync-native-sqlite.cjs && electron-builder --win --x64",
+    "desktop:rebuild": "electron-rebuild -f -w better-sqlite3",
     "start": "next start",
     "lint": "eslint",
     "test:portfolio": "node --experimental-strip-types --test tests/portfolio-priority-engine.test.mjs",
@@ -21,10 +28,12 @@
     "@supabase/ssr": "^0.12.4",
     "@supabase/supabase-js": "^2.112.3",
     "ai": "^7.0.124",
+    "better-sqlite3": "^12.11.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.33.0",
     "next": "16.3.2",
+    "proper-lockfile": "^4.1.2",
     "papaparse": "^5.6.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
@@ -36,15 +45,79 @@
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "^4.4.3"
   },
+  "build": {
+    "appId": "br.com.tecnoperfil.tecnomes.local",
+    "productName": "TecnoMES Local",
+    "asar": true,
+    "npmRebuild": false,
+    "files": [
+      "electron/**/*",
+      "package.json",
+      "!node_modules/**/*",
+      "!src/**/*",
+      "!public/**/*",
+      "!.next/**/*",
+      "!dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": ".next/standalone",
+        "to": "next",
+        "filter": [
+          "**/*",
+          "!node_modules/**/*",
+          "!data/**/*",
+          "!dist/**/*"
+        ]
+      },
+      {
+        "from": ".next/standalone/node_modules",
+        "to": "next/node_modules",
+        "filter": ["**/*"]
+      },
+      {
+        "from": ".next/static",
+        "to": "next/.next/static"
+      },
+      {
+        "from": "public",
+        "to": "next/public"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
   "devDependencies": {
+    "@electron/rebuild": "^4.2.1",
     "@tailwindcss/postcss": "^4",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",
     "@types/papaparse": "^5.5.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^9.2.5",
+    "electron": "^39.8.10",
+    "electron-builder": "^26.15.3",
     "eslint": "^9",
     "eslint-config-next": "16.3.2",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wait-on": "^8.0.5"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "electron@39.8.10": true,
+    "electron-winstaller@5.4.0": true,
+    "unrs-resolver@1.12.2": true
   }
 }
